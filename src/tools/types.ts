@@ -2,7 +2,6 @@
  * Tool type definitions and helpers.
  */
 import { z } from 'zod';
-import { zodToJsonSchema } from 'zod-to-json-schema';
 import type { Context, Tool, ToolSchema, ToolResult, ContentItem } from '../types.js';
 
 /**
@@ -16,9 +15,9 @@ export function createTool<T extends z.ZodType>(options: {
 }): Tool {
   const { name, description, schema, handle } = options;
 
-  const inputSchema = zodToJsonSchema(schema, {
-    $refStrategy: 'none',
-    target: 'openApi3',
+  const inputSchema = z.toJSONSchema(schema, {
+    io: 'input',
+    target: 'draft-7',
   }) as Record<string, unknown>;
 
   // Remove $schema property as MCP doesn't need it

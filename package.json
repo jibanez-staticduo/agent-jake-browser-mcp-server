@@ -26,6 +26,8 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.2",
     "commander": "^14.0.2",
+    "express": "^5.1.0",
+    "tsx": "^4.20.5",
     "ws": "^8.19.0",
     "zod": "^4.3.5",
     "zod-to-json-schema": "^3.25.1"

@@ -99,7 +99,8 @@ export const getConsoleLogsTool: Tool = createTool({
       return errorResult(response.error?.message ?? 'Get console logs failed');
     }
 
-    const logs = response.result as Array<{ type: string; text: string; timestamp: number }>;
+    const rawLogs = response.result as Array<{ type: string; text: string; timestamp: number }> | { logs?: Array<{ type: string; text: string; timestamp: number }> };
+    const logs = Array.isArray(rawLogs) ? rawLogs : rawLogs.logs ?? [];
 
     if (logs.length === 0) {
       return textResult('No console logs found');
@@ -183,6 +184,62 @@ export const getHtmlTool: Tool = createTool({
   },
 });
 
+/**
+ * Evaluate JavaScript code inside a same-origin iframe contentWindow.
+ */
+export const iframeEvalTool: Tool = createTool({
+  name: 'browser_iframe_eval',
+  description: 'Evaluate JavaScript directly in a same-origin iframe contentWindow.',
+  schema: z.object({
+    iframeSelector: z.string().describe('CSS selector for the target iframe'),
+    code: z.string().describe('JavaScript expression or code to evaluate in the iframe contentWindow'),
+  }),
+  async handle(context, params) {
+    const response = await context.send('browser_iframe_eval', {
+      iframeSelector: params.iframeSelector,
+      code: params.code,
+    });
+
+    if (!response.success) {
+      return errorResult(response.error?.message ?? 'Iframe evaluation failed');
+    }
+
+    const result = response.result;
+    const formatted = typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result);
+    return textResult(formatted);
+  },
+});
+
+/**
+ * Click an element inside a same-origin iframe without translating iframe-relative coordinates.
+ */
+export const iframeClickTool: Tool = createTool({
+  name: 'browser_iframe_click',
+  description: 'Click an element inside a same-origin iframe by iframe selector and target selector. Optionally waits for iframe navigation.',
+  schema: z.object({
+    iframeSelector: z.string().describe('CSS selector for the target iframe'),
+    targetSelector: z.string().describe('CSS selector for the element inside the iframe to click'),
+    waitForNavigation: z.boolean().optional().default(false).describe('Wait for iframe navigation after the click'),
+    timeout: z.number().min(0).max(30000).optional().default(10000).describe('Maximum navigation wait in milliseconds'),
+  }),
+  async handle(context, params) {
+    const response = await context.send('browser_iframe_click', {
+      iframeSelector: params.iframeSelector,
+      targetSelector: params.targetSelector,
+      waitForNavigation: params.waitForNavigation,
+      timeout: params.timeout,
+    });
+
+    if (!response.success) {
+      return errorResult(response.error?.message ?? 'Iframe click failed');
+    }
+
+    const result = response.result;
+    const formatted = typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result);
+    return textResult(formatted);
+  },
+});
+
 export const utilityTools: Tool[] = [
   waitTool,
   screenshotTool,
@@ -190,4 +247,6 @@ export const utilityTools: Tool[] = [
   evaluateTool,
   resizeViewportTool,
   getHtmlTool,
+  iframeEvalTool,
+  iframeClickTool,
 ];

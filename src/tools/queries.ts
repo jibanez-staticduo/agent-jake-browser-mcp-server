@@ -28,7 +28,8 @@ export const getTextTool: Tool = createTool({
       return errorResult(response.error?.message ?? 'Get text failed');
     }
 
-    const text = response.result as string;
+    const rawText = response.result as string | { text?: string };
+    const text = typeof rawText === 'string' ? rawText : rawText.text;
     return textResult(text || '(empty)');
   },
 });
@@ -58,7 +59,8 @@ export const getAttributeTool: Tool = createTool({
       return errorResult(response.error?.message ?? 'Get attribute failed');
     }
 
-    const value = response.result as string | null;
+    const rawValue = response.result as string | null | { value?: string | null };
+    const value = typeof rawValue === 'object' && rawValue !== null ? rawValue.value : rawValue;
     return textResult(value ?? '(null)');
   },
 });

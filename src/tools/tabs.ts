@@ -47,13 +47,20 @@ export const listTabsTool: Tool = createTool({
       return errorResult(response.error?.message ?? 'List tabs failed');
     }
 
-    const tabs = response.result as Array<{
+    const rawTabs = response.result as Array<{
       id: number;
       title: string;
       url: string;
       active: boolean;
       connected: boolean;
-    }>;
+    }> | { tabs?: Array<{
+      id: number;
+      title: string;
+      url: string;
+      active: boolean;
+      connected: boolean;
+    }> };
+    const tabs = Array.isArray(rawTabs) ? rawTabs : rawTabs.tabs ?? [];
 
     if (tabs.length === 0) {
       return textResult('No tabs found');

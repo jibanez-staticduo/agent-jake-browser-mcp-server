@@ -89,8 +89,7 @@ export async function createServer(options: ServerOptions): Promise<MCPServer> {
         }
       }
 
-      const result: ToolResult = await tool.handle(context, args as Record<string, unknown>);
-      return result;
+      return (await tool.handle(context, args as Record<string, unknown>)) as any;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error(`Tool error: ${name}`, message);

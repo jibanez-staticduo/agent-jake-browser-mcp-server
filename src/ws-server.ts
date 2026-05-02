@@ -32,17 +32,17 @@ export function createWSServer(options: WSServerOptions): WSServer {
     timeout: NodeJS.Timeout;
   }>();
 
-  const server = new WebSocketServer({ port, host: '127.0.0.1' });
+  const server = new WebSocketServer({ port, host: '0.0.0.0' });
 
-  logger.info(`WebSocket server listening on ws://127.0.0.1:${port}`);
+  logger.info(`WebSocket server listening on ws://0.0.0.0:${port}`);
 
   server.on('connection', (ws) => {
     logger.info('Extension connected');
 
-    // Only allow one connection at a time
     if (connection && connection.readyState === WebSocket.OPEN) {
-      logger.warn('Closing existing connection for new one');
-      connection.close();
+      logger.warn('Existing extension connection is still open; closing newer duplicate connection');
+      ws.close(1000, 'Existing connection active');
+      return;
     }
 
     connection = ws;
@@ -54,7 +54,13 @@ export function createWSServer(options: WSServerOptions): WSServer {
         logger.info('[WS] Raw message received, length:', dataStr.length);
         logger.info('[WS] Message preview:', dataStr.substring(0, 200));
 
-        const message = JSON.parse(dataStr) as ExtensionResponse;
+        const rawMessage = JSON.parse(dataStr);
+        if ((rawMessage as { type?: string })?.type === 'heartbeat') {
+          logger.debug('[WS] Heartbeat received');
+          return;
+        }
+
+        const message = rawMessage as ExtensionResponse;
         logger.info('[WS] Parsed message id:', message.id, 'success:', message.success);
         logger.info('[WS] Pending request IDs:', Array.from(pendingRequests.keys()));
 
