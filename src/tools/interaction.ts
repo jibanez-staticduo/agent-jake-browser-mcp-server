@@ -126,11 +126,13 @@ export const dragTool: Tool = createTool({
     { message: 'Target ref or selector must be provided' }
   ),
   async handle(context, params) {
+    // The extension's wire format is start*/end* (see its schemas.ts); the MCP
+    // surface keeps source*/target* so existing callers do not break.
     const response = await context.send('browser_drag', {
-      sourceRef: params.sourceRef,
-      sourceSelector: params.sourceSelector,
-      targetRef: params.targetRef,
-      targetSelector: params.targetSelector,
+      startRef: params.sourceRef,
+      startSelector: params.sourceSelector,
+      endRef: params.targetRef,
+      endSelector: params.targetSelector,
     });
 
     if (!response.success) {
