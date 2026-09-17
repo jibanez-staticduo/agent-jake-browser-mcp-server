@@ -10,7 +10,7 @@ import type { Tool } from '../types.js';
  */
 export const clickTool: Tool = createTool({
   name: 'browser_click',
-  description: 'Click on an element identified by its ref from a snapshot, or by CSS selector.',
+  description: 'Click on an element identified by its ref from a snapshot, or by CSS selector. Refs that carry a frame tag ("f3:s1e42") are routed to that iframe automatically.',
   schema: z.object({
     ref: z.string().optional().describe('Element reference from snapshot (e.g., "e12")'),
     selector: z.string().optional().describe('CSS selector to find the element'),

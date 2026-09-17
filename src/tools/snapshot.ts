@@ -10,7 +10,7 @@ import type { Tool } from '../types.js';
  */
 export const snapshotTool: Tool = createTool({
   name: 'browser_snapshot',
-  description: `EXPENSIVE FALLBACK: full accessibility tree of the page (can be 10-50x larger than browser_state). Use browser_state first; reach for this only when the compact state is not enough — nested structure you need to understand, or elements browser_state does not list. Returns refs (ref="s1e42") that work with click/type exactly like compact [n] refs.`,
+  description: `EXPENSIVE FALLBACK: full accessibility tree of the page (can be 10-50x larger than browser_state). Use browser_state first; reach for this only when the compact state is not enough — nested structure you need to understand, or elements browser_state does not list. Returns refs (ref="s1e42") that work with click/type exactly like compact [n] refs. Elements inside an iframe come back with their frame tag ("f3:s1e42"): pass the ref exactly as printed — stripped of the tag it resolves against the top frame and finds nothing.`,
   schema: z.object({
     selector: z.string()
       .optional()
