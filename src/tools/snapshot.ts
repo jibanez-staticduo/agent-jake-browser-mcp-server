@@ -10,7 +10,7 @@ import type { Tool } from '../types.js';
  */
 export const snapshotTool: Tool = createTool({
   name: 'browser_snapshot',
-  description: `Take an accessibility snapshot of the current page. Returns a simplified representation of the page structure with element references (ref="...") that can be used with other tools like click, type, etc. Always use this before interacting with elements.`,
+  description: `Take an accessibility snapshot of the current page. Returns a simplified representation of the page structure with element references (ref="...") that can be used with other tools like click, type, etc. Always use this before interacting with elements. Elements inside an iframe come back with their frame tag ("f3:s1e42"): pass the ref exactly as printed — stripped of the tag it resolves against the top frame and finds nothing.`,
   schema: z.object({
     selector: z.string()
       .optional()
