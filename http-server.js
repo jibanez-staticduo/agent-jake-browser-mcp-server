@@ -119,7 +119,10 @@ app.delete('/mcp', async (req, res) => {
   await transport.handleRequest(req, res, req.body);
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.error(`Agent Jake Browser MCP HTTP endpoint on 0.0.0.0:${PORT}/mcp`);
-  console.error(`Agent Jake Browser extension WebSocket on 0.0.0.0:${WS_PORT}`);
+// SECURITY: the MCP endpoint has no auth of its own, so it binds to loopback
+// only. Remote use goes through an ssh tunnel — never by exposing the port.
+const HTTP_HOST = process.env.MCP_HTTP_HOST || '127.0.0.1';
+app.listen(PORT, HTTP_HOST, () => {
+  console.error(`Agent Jake Browser MCP HTTP endpoint on ${HTTP_HOST}:${PORT}/mcp`);
+  console.error(`Agent Jake Browser extension WebSocket on ${process.env.BROWSER_WS_HOST || '127.0.0.1'}:${WS_PORT}`);
 });

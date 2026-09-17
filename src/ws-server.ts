@@ -32,11 +32,40 @@ export function createWSServer(options: WSServerOptions): WSServer {
     timeout: NodeJS.Timeout;
   }>();
 
-  const server = new WebSocketServer({ port, host: '0.0.0.0' });
+  // SECURITY: this used to listen on 0.0.0.0 with no auth and no origin check —
+  // anyone on the LAN could impersonate the extension and pilot the browser.
+  // Now: loopback by default, and a shared token (BROWSER_WS_TOKEN) is required.
+  const host = process.env.BROWSER_WS_HOST || '127.0.0.1';
+  const token = process.env.BROWSER_WS_TOKEN || '';
+  const server = new WebSocketServer({
+    port,
+    host,
+    // Reject at the HANDSHAKE (401), not after accepting: a connection without
+    // the token never opens, so the client cannot mistake it for a live one.
+    verifyClient: (info, done) => {
+      if (!token) return done(true);
+      try {
+        const url = new URL(info.req.url || '/', `http://${info.req.headers.host || 'localhost'}`);
+        if (url.searchParams.get('token') === token) return done(true);
+      } catch {
+        // fall through to rejection
+      }
+      logger.warn('Handshake rejected: missing or invalid token');
+      return done(false, 401, 'unauthorized');
+    },
+  });
 
-  logger.info(`WebSocket server listening on ws://0.0.0.0:${port}`);
+  logger.info(`WebSocket server listening on ws://${host}:${port}${token ? ' (token required)' : ' (NO TOKEN)'}`);
 
-  server.on('connection', (ws) => {
+  server.on('connection', (ws, req) => {
+    if (token) {
+      const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+      if (url.searchParams.get('token') !== token) {
+        logger.warn('Connection rejected: missing or invalid token');
+        ws.close(4401, 'unauthorized');
+        return;
+      }
+    }
     logger.info('Extension connected');
 
     if (connection && connection.readyState === WebSocket.OPEN) {
