@@ -2,8 +2,19 @@
  * Utility tools: wait, screenshot, getConsoleLogs, evaluate, resizeViewport.
  */
 import { z } from 'zod';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { dirname, isAbsolute, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { createTool, textResult, imageResult, errorResult } from './types.js';
 import type { Tool } from '../types.js';
+
+/**
+ * Where browser-produced files land when no path is given.
+ * AGENT_BROWSER_OUT_DIR moves it; the system temp dir is the default.
+ */
+function outDir(): string {
+  return process.env.AGENT_BROWSER_OUT_DIR || tmpdir();
+}
 
 /**
  * Wait for a specified time.
@@ -240,9 +251,57 @@ export const iframeClickTool: Tool = createTool({
   },
 });
 
+/**
+ * Print the page to a PDF file.
+ *
+ * It exists because some sites' own "save or print" produces nothing usable (a bank
+ * that only opens blank tabs, for one) and the receipt still has to come out. The PDF
+ * is written to disk and the tool returns only the path, so it costs no context.
+ */
+export const pdfTool: Tool = createTool({
+  name: 'browser_pdf',
+  description: 'Save the current page as a PDF (CDP Page.printToPDF) to a file and return its path. Useful when the site offers no usable download of its own (receipts, confirmations). It does not return the PDF itself, so it costs no tokens.',
+  schema: z.object({
+    path: z.string().optional().describe('Output file path. Defaults to a timestamped file in the temp dir (or AGENT_BROWSER_OUT_DIR)'),
+    landscape: z.boolean().optional().default(false).describe('Landscape orientation'),
+    printBackground: z.boolean().optional().default(true).describe('Include background colours and images'),
+    scale: z.number().min(0.1).max(2).optional().default(1).describe('Print scale (0.1 to 2)'),
+    pageRanges: z.string().optional().describe('Pages to include, e.g. "1-3" or "1,3"'),
+  }),
+  async handle(context, params) {
+    const response = await context.send('browser_pdf', {
+      landscape: params.landscape,
+      printBackground: params.printBackground,
+      scale: params.scale,
+      pageRanges: params.pageRanges,
+    });
+
+    if (!response.success) {
+      return errorResult(response.error?.message ?? 'browser_pdf failed');
+    }
+
+    const result = response.result as { pdf?: string } | string;
+    const base64 = typeof result === 'string' ? result : result.pdf;
+    if (!base64) {
+      return errorResult('The extension returned no PDF');
+    }
+
+    const target = params.path
+      ? (isAbsolute(params.path) ? params.path : resolve(outDir(), params.path))
+      : resolve(outDir(), `agent-browser-${Date.now()}.pdf`);
+
+    const bytes = Buffer.from(base64, 'base64');
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, bytes);
+
+    return textResult(`PDF saved to ${target} (${bytes.length} bytes)`);
+  },
+});
+
 export const utilityTools: Tool[] = [
   waitTool,
   screenshotTool,
+  pdfTool,
   getConsoleLogsTool,
   evaluateTool,
   resizeViewportTool,
