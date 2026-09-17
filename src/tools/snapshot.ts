@@ -10,7 +10,7 @@ import type { Tool } from '../types.js';
  */
 export const snapshotTool: Tool = createTool({
   name: 'browser_snapshot',
-  description: `Take an accessibility snapshot of the current page. Returns a simplified representation of the page structure with element references (ref="...") that can be used with other tools like click, type, etc. Always use this before interacting with elements.`,
+  description: `EXPENSIVE FALLBACK: full accessibility tree of the page (can be 10-50x larger than browser_state). Use browser_state first; reach for this only when the compact state is not enough — nested structure you need to understand, or elements browser_state does not list. Returns refs (ref="s1e42") that work with click/type exactly like compact [n] refs.`,
   schema: z.object({
     selector: z.string()
       .optional()
