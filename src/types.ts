@@ -13,6 +13,8 @@ export type ToolName =
   | 'browser_go_forward'
   | 'browser_reload'
   // Snapshot
+  | 'browser_state'
+  | 'browser_find'
   | 'browser_snapshot'
   // Interaction
   | 'browser_click'
