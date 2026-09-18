@@ -1,6 +1,6 @@
 import express from 'express';
 import { randomUUID } from 'node:crypto';
-import { createReadStream } from 'node:fs';
+import { createReadStream, readFileSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -10,6 +10,7 @@ import { createContext } from './src/context.ts';
 import { getAllTools } from './src/tools/index.ts';
 import { getSharedTokenStore } from './src/token-store.ts';
 import { createPairingStore } from './src/pairing-store.ts';
+import { patchZipConfig } from './src/extension-zip.ts';
 
 const PORT = Number(process.env.MCP_HTTP_PORT || 8000);
 const WS_PORT = Number(process.env.BROWSER_WS_PORT || 8765);
@@ -195,15 +196,53 @@ app.get('/connections', (req, res) => {
   });
 });
 
+/**
+ * The patched archive is derived from the template plus BROWSER_PUBLIC_WS_URL, so
+ * one cache slot is enough; the key changes when the mounted template is replaced.
+ */
+let patchedZipCache = null;
+
+function patchedExtensionZip(zipPath, info, wsUrl) {
+  const key = JSON.stringify([zipPath, info.mtimeMs, info.size, wsUrl]);
+  if (patchedZipCache && patchedZipCache.key === key) return patchedZipCache.buffer;
+
+  const patched = patchZipConfig(readFileSync(zipPath), wsUrl);
+  patchedZipCache = { key, buffer: patched.buffer };
+  console.error(
+    `Agent Jake Browser: ${patched.replaced ? 'updated' : 'added'} ${patched.entryName} -> ${wsUrl} (${patched.buffer.length} bytes)`,
+  );
+  return patched.buffer;
+}
+
 app.get('/download', async (_req, res) => {
   try {
     const info = await stat(EXTENSION_ZIP);
+    const wsUrl = (process.env.BROWSER_PUBLIC_WS_URL || '').trim();
+
     res.setHeader('Cache-Control', 'public, max-age=60');
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader(
       'Content-Disposition',
       `attachment; filename="${path.basename(EXTENSION_ZIP)}"`,
     );
+
+    let patched = null;
+    if (wsUrl) {
+      try {
+        patched = patchedExtensionZip(EXTENSION_ZIP, info, wsUrl);
+      } catch (err) {
+        // A broken template must not take the download down: serve the original.
+        console.error('Agent Jake Browser: config.json injection failed, serving template as-is', err);
+        patched = null;
+      }
+    }
+
+    if (patched) {
+      res.setHeader('Content-Length', String(patched.length));
+      res.end(patched);
+      return;
+    }
+
     res.setHeader('Content-Length', String(info.size));
     createReadStream(EXTENSION_ZIP).pipe(res);
   } catch {
