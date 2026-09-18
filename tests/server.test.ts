@@ -80,6 +80,7 @@ describe('Tool Input Validation', () => {
     const mockContext = {
       send: vi.fn(),
       isConnected: () => true,
+      listConnections: () => [],
     };
 
     // Invalid URL should fail validation
@@ -95,6 +96,7 @@ describe('Tool Input Validation', () => {
     const mockContext = {
       send: vi.fn(),
       isConnected: () => true,
+      listConnections: () => [],
     };
 
     // Neither ref nor selector should fail
@@ -109,6 +111,7 @@ describe('Tool Input Validation', () => {
     const mockContext = {
       send: vi.fn(),
       isConnected: () => true,
+      listConnections: () => [],
     };
 
     // Timeout too large should fail
@@ -128,6 +131,7 @@ describe('Tool Result Formatting', () => {
     const mockContext = {
       send: vi.fn().mockResolvedValue({ success: true }),
       isConnected: () => true,
+      listConnections: () => [],
     };
 
     const result = await navigateTool.handle(mockContext, {
@@ -149,6 +153,7 @@ describe('Tool Result Formatting', () => {
         result: 'base64-image-data',
       }),
       isConnected: () => true,
+      listConnections: () => [],
     };
 
     const result = await screenshotTool.handle(mockContext, {});
@@ -168,6 +173,7 @@ describe('Tool Result Formatting', () => {
         error: { code: 'ELEMENT_NOT_FOUND', message: 'Element not found' },
       }),
       isConnected: () => true,
+      listConnections: () => [],
     };
 
     const result = await clickTool.handle(mockContext, { ref: 'e1' });

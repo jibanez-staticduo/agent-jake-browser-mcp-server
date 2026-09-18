@@ -76,6 +76,53 @@ Options:
   --help             Show help
 ```
 
+## Several browsers, tokens and pairing
+
+More than one browser can be attached at the same time. Each extension install
+connects with its own `connectionId`, and every tool accepts an optional
+`connection` argument choosing which browser runs the call. Without it the
+server targets the most recently used connection, so single-browser setups keep
+working exactly as before.
+
+```json
+{ "name": "browser_navigate", "arguments": { "url": "https://example.com", "connection": "chrome-office" } }
+```
+
+`browser_list_connections` answers with the live browsers (id, label, user agent,
+last activity and which one is active) and is answered by the server itself, so it
+also works while nothing is connected.
+
+### Environment
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `BROWSER_WS_HOST` | `127.0.0.1` | Bind address of the extension WebSocket. Set `0.0.0.0` when a reverse proxy reaches it from outside the container. |
+| `BROWSER_WS_PORT` | `8765` | Extension WebSocket port. |
+| `BROWSER_WS_TOKEN` | empty | Shared token required in the handshake (`?token=`). Empty disables static auth. |
+| `BROWSER_ALLOW_PAIRING` | `false` | `true` also accepts tokens issued by the pairing web. Auth is on when this or the static token is set. |
+| `BROWSER_TOKEN_STORE` | `/app/data/tokens.json` | JSON file where issued tokens live, so they survive a restart. Mount a volume for the path. |
+| `BROWSER_EXTENSION_ZIP` | `/app/extension/agent-jake-browser-extension.zip` | Archive served at `/download`. |
+| `BROWSER_PUBLIC_WS_URL` | derived | Full `ws(s)://host/path` handed to the extension. Use it when the proxy mapping is not derivable from the request. |
+| `BROWSER_WS_PATH` | `/` | Path advertised to the extension, for proxies that map the socket to a subpath. |
+| `MCP_HTTP_HOST` / `MCP_HTTP_PORT` | `127.0.0.1` / `8000` | MCP streamable HTTP endpoint. |
+
+### HTTP surface
+
+| Route | Purpose |
+| --- | --- |
+| `POST /mcp` (plus `GET`/`DELETE`) | MCP streamable HTTP endpoint. |
+| `GET /` | Small page with the download link, the pairing link and the live connection list. |
+| `GET /download` | Serves the extension zip from `BROWSER_EXTENSION_ZIP`. |
+| `GET /connections` | JSON: auth status, derived wsUrl and the current connections. |
+| `POST /pair/start` | Extension registers a one-time code (`{otp, connectionId?, label?}`), valid 10 minutes. |
+| `GET /pair` | Approval page, prefilled from `?otp=`. |
+| `POST /pair/approve` | `{otp}` → `{token, wsUrl}`; `410` when expired, unknown or already used. |
+| `GET /pair/status?otp=` | `pending` \| `approved` \| `expired`, with the token once approved. |
+
+Pairing means each install gets its own token instead of sharing one secret: the
+extension shows a code, a human approves it in the browser, and the issued token is
+stored on disk and accepted by the WebSocket handshake afterwards.
+
 ## Tools
 
 ### Navigation (4 tools)
@@ -130,6 +177,12 @@ Options:
 | `browser_wait` | Wait for a specified time |
 | `browser_screenshot` | Take a screenshot of the page |
 | `browser_get_console_logs` | Get console log messages |
+
+### Connections (1 tool)
+
+| Tool | Description |
+|------|-------------|
+| `browser_list_connections` | List the browsers attached to this server, answered without a browser |
 
 ## Example Usage
 
