@@ -1,22 +1,83 @@
 /**
  * WebSocket server for Chrome extension communication.
+ *
+ * Several browsers can be connected at the same time: every socket is stored in
+ * a registry keyed by the connectionId the extension sends in the handshake, and
+ * each tool call targets one of them (explicit id, most recently used, or the
+ * single open one).
  */
 import { WebSocketServer, WebSocket } from 'ws';
+import { timingSafeEqual } from 'crypto';
 import { logger } from './utils/logger.js';
-import type { ExtensionMessage, ExtensionResponse } from './types.js';
+import { getSharedTokenStore, type TokenStore } from './token-store.js';
+import { ConnectionRegistry, type ManagedConnection } from './connection-registry.js';
+import type { BrowserConnectionInfo, ExtensionMessage, ExtensionResponse } from './types.js';
 
 export interface WSServerOptions {
   port: number;
-  onConnection?: (ws: WebSocket) => void;
-  onDisconnection?: () => void;
+  host?: string;
+  tokenStore?: TokenStore;
+  onConnection?: (ws: WebSocket, connectionId: string) => void;
+  onDisconnection?: (connectionId: string) => void;
   onMessage?: (message: ExtensionResponse) => void;
+}
+
+export interface HandshakeParams {
+  token: string | null;
+  connectionId: string | null;
+  label: string | null;
 }
 
 export interface WSServer {
   server: WebSocketServer;
-  getConnection(): WebSocket | null;
-  send(message: ExtensionMessage): Promise<ExtensionResponse>;
+  registry: ConnectionRegistry;
+  getConnection(connectionId?: string): WebSocket | null;
+  listConnectionInfos(): BrowserConnectionInfo[];
+  /** Send and await the extension response, targeting one connection. */
+  sendTo(connectionId: string | undefined, message: ExtensionMessage): Promise<ExtensionResponse>;
+  /** Back-compatible alias used by the stdio path. */
+  send(message: ExtensionMessage, connectionId?: string): Promise<ExtensionResponse>;
   close(): Promise<void>;
+}
+
+/**
+ * Auth is on when a static token is configured or pairing tokens are accepted.
+ * With neither, the socket stays open (LAN / ssh-tunnel compatibility).
+ */
+export function isAuthEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env.BROWSER_WS_TOKEN || '') !== '' || env.BROWSER_ALLOW_PAIRING === 'true';
+}
+
+export function parseHandshakeParams(reqUrl: string, hostHeader?: string): HandshakeParams {
+  try {
+    const url = new URL(reqUrl || '/', `http://${hostHeader || 'localhost'}`);
+    return {
+      token: url.searchParams.get('token'),
+      connectionId: url.searchParams.get('connectionId'),
+      label: url.searchParams.get('label'),
+    };
+  } catch {
+    return { token: null, connectionId: null, label: null };
+  }
+}
+
+/** Constant-time compare so the shared token does not leak through timing. */
+function safeEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
+}
+
+export function isAuthorizedToken(
+  token: string | null,
+  tokenStore: TokenStore,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  if (!token) return false;
+  const staticToken = env.BROWSER_WS_TOKEN || '';
+  if (staticToken && safeEqual(token, staticToken)) return true;
+  return tokenStore.isValid(token);
 }
 
 /**
@@ -24,8 +85,8 @@ export interface WSServer {
  */
 export function createWSServer(options: WSServerOptions): WSServer {
   const { port, onConnection, onDisconnection, onMessage } = options;
-
-  let connection: WebSocket | null = null;
+  const tokenStore = options.tokenStore ?? getSharedTokenStore();
+  const registry = new ConnectionRegistry();
   const pendingRequests = new Map<string, {
     resolve: (response: ExtensionResponse) => void;
     reject: (error: Error) => void;
@@ -34,50 +95,78 @@ export function createWSServer(options: WSServerOptions): WSServer {
 
   // SECURITY: this used to listen on 0.0.0.0 with no auth and no origin check —
   // anyone on the LAN could impersonate the extension and pilot the browser.
-  // Now: loopback by default, and a shared token (BROWSER_WS_TOKEN) is required.
-  const host = process.env.BROWSER_WS_HOST || '127.0.0.1';
-  const token = process.env.BROWSER_WS_TOKEN || '';
+  // Now: loopback by default, and a token (static BROWSER_WS_TOKEN or one issued
+  // by the pairing page) is required whenever auth is enabled.
+  const host = options.host || process.env.BROWSER_WS_HOST || '127.0.0.1';
+
+  function authorize(token: string | null): boolean {
+    if (!isAuthEnabled()) return true;
+    return isAuthorizedToken(token, tokenStore);
+  }
+
   const server = new WebSocketServer({
     port,
     host,
     // Reject at the HANDSHAKE (401), not after accepting: a connection without
-    // the token never opens, so the client cannot mistake it for a live one.
+    // a valid token never opens, so the client cannot mistake it for a live one.
     verifyClient: (info, done) => {
-      if (!token) return done(true);
-      try {
-        const url = new URL(info.req.url || '/', `http://${info.req.headers.host || 'localhost'}`);
-        if (url.searchParams.get('token') === token) return done(true);
-      } catch {
-        // fall through to rejection
-      }
+      const params = parseHandshakeParams(
+        info.req.url || '/',
+        info.req.headers.host || 'localhost',
+      );
+      if (authorize(params.token)) return done(true);
       logger.warn('Handshake rejected: missing or invalid token');
       return done(false, 401, 'unauthorized');
     },
   });
 
-  logger.info(`WebSocket server listening on ws://${host}:${port}${token ? ' (token required)' : ' (NO TOKEN)'}`);
+  logger.info(
+    `WebSocket server listening on ws://${host}:${port}${
+      isAuthEnabled() ? ' (token required)' : ' (NO TOKEN)'
+    }`,
+  );
 
   server.on('connection', (ws, req) => {
-    if (token) {
-      const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
-      if (url.searchParams.get('token') !== token) {
-        logger.warn('Connection rejected: missing or invalid token');
-        ws.close(4401, 'unauthorized');
-        return;
-      }
-    }
-    logger.info('Extension connected');
+    const params = parseHandshakeParams(req.url || '/', req.headers.host || 'localhost');
 
-    if (connection && connection.readyState === WebSocket.OPEN) {
-      logger.warn('Existing extension connection is still open; closing newer duplicate connection');
-      ws.close(1000, 'Existing connection active');
+    // Defense in depth: verifyClient already gated the upgrade, but a proxy that
+    // replays or a future refactor must not turn the socket into a live session.
+    if (!authorize(params.token)) {
+      logger.warn('Connection rejected: missing or invalid token');
+      ws.close(4401, 'unauthorized');
       return;
     }
 
-    connection = ws;
-    onConnection?.(ws);
+    const connectionId = params.connectionId?.trim() || registry.nextAnonymousId();
+    const { added, replaced } = registry.add({
+      connectionId,
+      ws,
+      label: params.label?.trim() || undefined,
+      userAgent: req.headers['user-agent'],
+    });
+
+    if (replaced) {
+      logger.warn(
+        `Connection ${connectionId} reconnected: closing stale socket (was open for ${Math.round(
+          (Date.now() - replaced.connectedAt) / 1000,
+        )}s)`,
+      );
+      try {
+        replaced.ws.close(1000, 'Replaced by newer connection with the same id');
+      } catch {
+        // the stale socket is already gone; the registry entry is replaced anyway
+      }
+    }
+
+    logger.info(
+      `Extension connected (${connectionId})${added.label ? ` label=${added.label}` : ''} — ${
+        registry.openIds().length
+      } connection(s) active`,
+    );
+    onConnection?.(ws, connectionId);
 
     ws.on('message', (data) => {
+      registry.touch(connectionId);
       try {
         const dataStr = data.toString();
         logger.info('[WS] Raw message received, length:', dataStr.length);
@@ -111,11 +200,12 @@ export function createWSServer(options: WSServerOptions): WSServer {
     });
 
     ws.on('close', () => {
-      logger.info('Extension disconnected');
-      if (connection === ws) {
-        connection = null;
+      if (registry.remove(connectionId, ws)) {
+        logger.info(`Extension disconnected (${connectionId})`);
+        onDisconnection?.(connectionId);
+      } else {
+        logger.debug(`Stale socket closed for ${connectionId}, registry kept`);
       }
-      onDisconnection?.();
     });
 
     ws.on('error', (err) => {
@@ -127,41 +217,88 @@ export function createWSServer(options: WSServerOptions): WSServer {
     logger.error('WebSocket server error', err);
   });
 
+  function targetSocket(connectionId?: string): { ws: WebSocket; connectionId: string } | null {
+    const resolved = registry.resolve(connectionId);
+    if (!resolved.ok) return null;
+    const conn = registry.get(resolved.connectionId);
+    if (!conn || conn.ws.readyState !== WebSocket.OPEN) return null;
+    return { ws: conn.ws, connectionId: resolved.connectionId };
+  }
+
+  function resolutionError(connectionId?: string): Error {
+    const resolved = registry.resolve(connectionId);
+    if (resolved.ok) return new Error('No extension connected');
+    const ids = resolved.openIds.join(', ');
+    // An explicit id that cannot be targeted always deserves the list hint.
+    if (connectionId) {
+      return new Error(
+        `No browser connection with id "${connectionId}" (open: ${ids || 'none'}). Call browser_list_connections to see the current ones.`,
+      );
+    }
+    switch (resolved.reason) {
+      case 'ambiguous':
+        return new Error(
+          `Multiple browser connections open (${ids}); pass the "connection" argument. Call browser_list_connections to see them.`,
+        );
+      default:
+        return new Error('No extension connected');
+    }
+  }
+
+  function sendTo(
+    connectionId: string | undefined,
+    message: ExtensionMessage,
+  ): Promise<ExtensionResponse> {
+    return new Promise((resolve, reject) => {
+      const target = targetSocket(connectionId);
+      if (!target) {
+        reject(resolutionError(connectionId));
+        return;
+      }
+
+      logger.info(
+        `[WS] Sending message id: ${message.id}, type: ${message.type} -> ${target.connectionId}`,
+      );
+
+      const timeout = setTimeout(() => {
+        logger.error(`[WS] TIMEOUT for id: ${message.id}, type: ${message.type}`);
+        pendingRequests.delete(message.id);
+        reject(new Error(`Request timed out: ${message.type}`));
+      }, 30000);
+
+      pendingRequests.set(message.id, { resolve, reject, timeout });
+      registry.markUsed(target.connectionId);
+      registry.touch(target.connectionId);
+
+      const jsonStr = JSON.stringify(message);
+      logger.info('[WS] Sending JSON length:', jsonStr.length);
+      target.ws.send(jsonStr);
+    });
+  }
+
   return {
     server,
+    registry,
 
-    getConnection() {
-      return connection;
+    getConnection(connectionId?: string) {
+      return targetSocket(connectionId)?.ws ?? null;
     },
 
-    send(message: ExtensionMessage): Promise<ExtensionResponse> {
-      return new Promise((resolve, reject) => {
-        if (!connection || connection.readyState !== WebSocket.OPEN) {
-          reject(new Error('No extension connected'));
-          return;
-        }
+    listConnectionInfos() {
+      return registry.list();
+    },
 
-        logger.info(`[WS] Sending message id: ${message.id}, type: ${message.type}`);
+    sendTo,
 
-        const timeout = setTimeout(() => {
-          logger.error(`[WS] TIMEOUT for id: ${message.id}, type: ${message.type}`);
-          pendingRequests.delete(message.id);
-          reject(new Error(`Request timed out: ${message.type}`));
-        }, 30000);
-
-        pendingRequests.set(message.id, { resolve, reject, timeout });
-
-        const jsonStr = JSON.stringify(message);
-        logger.info('[WS] Sending JSON length:', jsonStr.length);
-        connection.send(jsonStr);
-      });
+    send(message: ExtensionMessage, connectionId?: string) {
+      return sendTo(connectionId, message);
     },
 
     /**
      * Gracefully close the server.
      *
      * Waits for pending requests to complete (up to timeout) before
-     * forcibly closing connections.
+     * forcibly closing every connection.
      */
     async close(): Promise<void> {
       logger.info(`[WS] Closing server, ${pendingRequests.size} pending requests`);
@@ -169,7 +306,7 @@ export function createWSServer(options: WSServerOptions): WSServer {
       // If there are pending requests, wait for them (up to 5s)
       if (pendingRequests.size > 0) {
         const pendingPromises = Array.from(pendingRequests.entries()).map(
-          ([id, pending]) =>
+          ([, pending]) =>
             new Promise<void>((resolve) => {
               // Wrap the original resolve/reject to also resolve our wait
               const originalResolve = pending.resolve;
@@ -202,11 +339,12 @@ export function createWSServer(options: WSServerOptions): WSServer {
         pendingRequests.delete(id);
       }
 
-      // Close connection
-      if (connection) {
-        connection.close();
-        connection = null;
+      // Close every live connection
+      const sockets: ManagedConnection[] = registry.all();
+      for (const conn of sockets) {
+        conn.ws.close();
       }
+      pendingRequests.clear();
 
       // Close server
       return new Promise((resolve) => {
