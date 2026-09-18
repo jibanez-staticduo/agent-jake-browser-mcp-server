@@ -123,6 +123,20 @@ Pairing means each install gets its own token instead of sharing one secret: the
 extension shows a code, a human approves it in the browser, and the issued token is
 stored on disk and accepted by the WebSocket handshake afterwards.
 
+### Download with the server address baked in
+
+When `BROWSER_PUBLIC_WS_URL` is set, `/download` injects a root-level `config.json`
+into the archive before sending it:
+
+```json
+{ "version": 1, "wsUrl": "wss://agent-browser.staticduo.com/ws" }
+```
+
+The template mounted at `BROWSER_EXTENSION_ZIP` stays read-only and untouched; the
+patched archive is built in memory and cached until the template or the URL changes.
+Without `BROWSER_PUBLIC_WS_URL` the template is served byte for byte, and no token is
+ever written into the archive — authentication comes from pairing.
+
 ## Tools
 
 ### Navigation (4 tools)
