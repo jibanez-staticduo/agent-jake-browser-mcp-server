@@ -491,6 +491,9 @@ describe('patchZipConfig helpers', () => {
     expect(configEntryName(['dist/manifest.json', 'dist/assets/a.js'])).toBe('dist/config.json');
     expect(configEntryName(['.vite/manifest.json'])).toBe('config.json');
     expect(configEntryName(['assets/a.js'])).toBe('config.json');
+    expect(
+      configEntryName(['dist/.vite/manifest.json', 'dist/manifest.json', 'dist/assets/a.js']),
+    ).toBe('dist/config.json');
   });
 
   it('adds or updates the entry and leaves the rest alone', () => {

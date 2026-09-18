@@ -39,7 +39,7 @@ export function configEntryName(entryNames: string[]): string {
   if (manifestAtRoot) return 'config.json';
 
   const nestedManifest = entryNames.find(
-    (name) => name.endsWith('manifest.json') && !name.startsWith('.vite/'),
+    (name) => name.endsWith('manifest.json') && !name.split('/').includes('.vite'),
   );
   if (!nestedManifest) return 'config.json';
 
