@@ -1,6 +1,11 @@
 import net from 'node:net';
 import http from 'node:http';
 
+// Mirror the ports the server actually binds: a compose file or a Kubernetes
+// Deployment that moves them must not turn the healthcheck into a false red.
+const WS_PORT = Number(process.env.BROWSER_WS_PORT || 8765);
+const HTTP_PORT = Number(process.env.MCP_HTTP_PORT || 8000);
+
 function checkTcp(port) {
   return new Promise((resolve, reject) => {
     const socket = net.connect({ host: '127.0.0.1', port, timeout: 3000 }, () => {
@@ -34,6 +39,6 @@ function checkHttp(pathname, port) {
 }
 
 await Promise.all([
-  checkTcp(8765),
-  checkHttp('/healthz', 8000),
+  checkTcp(WS_PORT),
+  checkHttp('/healthz', HTTP_PORT),
 ]);
