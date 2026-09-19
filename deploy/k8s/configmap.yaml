@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-jake-browser-config
+data:
+  # The address the extension is handed at pairing time and embedded in the
+  # downloaded zip. It must be what the browser can actually reach from
+  # outside the cluster — not the Service name, which means nothing there.
+  publicWsUrl: "wss://browser-mcp.example.com/ws"
+  # Origin used to build the approval link shown by /pair/start.
+  publicOrigin: "https://browser-mcp.example.com"

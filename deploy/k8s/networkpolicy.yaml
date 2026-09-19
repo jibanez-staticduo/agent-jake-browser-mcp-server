@@ -1,0 +1,66 @@
+# The MCP plane has no authentication of its own. On a laptop it is protected by
+# binding to loopback; in a pod that protection is gone the moment it binds
+# 0.0.0.0, which it must. These policies put the boundary back.
+#
+# Read them as the deployment's security contract, not as optional hardening:
+# without them any pod in the cluster can drive a browser that holds the user's
+# logged-in sessions. They need a CNI that enforces NetworkPolicy (Calico,
+# Cilium, Antrea…). On a cluster whose CNI ignores them — plain flannel, some
+# managed defaults — this deployment is not safe; put an authenticating proxy in
+# front instead.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-jake-browser-default-deny
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-jake-browser
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-jake-browser-allow-mcp-clients
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-jake-browser
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # Label the pods that are allowed to drive the browser, and only those:
+        #   kubectl label pod/<agent> agent-jake-browser/client=true
+        # An empty `from` here would mean "the whole cluster", which is what
+        # this file exists to prevent.
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              agent-jake-browser/client: "true"
+      ports:
+        - port: 8000
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-jake-browser-allow-ws-from-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-jake-browser
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # The browser is outside the cluster, so its WebSocket arrives through
+        # the ingress controller. Point this at the namespace yours runs in —
+        # the label below is the one Kubernetes sets automatically.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 8765
+          protocol: TCP

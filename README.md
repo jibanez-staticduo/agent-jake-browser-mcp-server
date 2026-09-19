@@ -65,6 +65,27 @@ Add to your MCP settings:
 }
 ```
 
+### On Kubernetes
+
+The server also runs as a pod, with the browser staying on your own machine —
+useful when the agents that drive it already live in the cluster. Manifests and
+the security contract that comes with them are in
+[`deploy/k8s/`](deploy/k8s/README.md):
+
+```bash
+docker build -t <registry>/agent-jake-browser-mcp-server:<tag> .
+# edit deploy/k8s/kustomization.yaml, configmap.yaml, ingress.yaml
+kubectl apply -k deploy/k8s
+```
+
+Agents then reach it over streamable HTTP at
+`http://agent-jake-browser.agent-jake-browser.svc:8000/mcp`, and browsers pair
+from wherever they are.
+
+One thing not to skip: in a pod the MCP endpoint cannot bind loopback, which is
+the only thing protecting it on a laptop. `deploy/k8s/networkpolicy.yaml`
+replaces that boundary and is part of the deployment, not an optional extra.
+
 ### CLI Options
 
 ```bash
@@ -105,6 +126,8 @@ also works while nothing is connected.
 | `BROWSER_PUBLIC_WS_URL` | derived | Full `ws(s)://host/path` handed to the extension. Use it when the proxy mapping is not derivable from the request. |
 | `BROWSER_WS_PATH` | `/` | Path advertised to the extension, for proxies that map the socket to a subpath. |
 | `MCP_HTTP_HOST` / `MCP_HTTP_PORT` | `127.0.0.1` / `8000` | MCP streamable HTTP endpoint. |
+| `BROWSER_PUBLIC_ORIGIN` | derived | Origin used to build the approval link returned by `/pair/start`. Set it when the proxy host is not derivable from the request. |
+| `AGENT_BROWSER_OUT_DIR` | system temp dir | Where `browser_pdf` and `browser_screenshot` write their files. |
 
 ### HTTP surface
 
