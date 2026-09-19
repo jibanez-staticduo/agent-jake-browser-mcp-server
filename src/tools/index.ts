@@ -8,6 +8,7 @@ import { interactionTools } from './interaction.js';
 import { utilityTools } from './utility.js';
 import { tabTools } from './tabs.js';
 import { queryTools } from './queries.js';
+import { connectionsTools } from './connections.js';
 import type { Tool } from '../types.js';
 
 /**
@@ -22,6 +23,7 @@ export function getAllTools(): Tool[] {
     ...utilityTools,
     ...tabTools,
     ...queryTools,
+    ...connectionsTools,
   ];
 }
 
@@ -33,6 +35,7 @@ export { interactionTools } from './interaction.js';
 export { utilityTools } from './utility.js';
 export { tabTools } from './tabs.js';
 export { queryTools } from './queries.js';
+export { connectionsTools } from './connections.js';
 
 // Re-export types and helpers
 export { createTool, textResult, imageResult, errorResult, mixedResult } from './types.js';

@@ -60,8 +60,13 @@ export async function createServer(options: ServerOptions): Promise<MCPServer> {
 
   // Handle tools/call request
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args } = request.params;
-    logger.info(`Calling tool: ${name}`, args);
+    const { name, arguments: rawArgs } = request.params;
+    const args = { ...(rawArgs ?? {}) } as Record<string, unknown>;
+    // `connection` selects the browser and never reaches the extension.
+    const connection =
+      typeof args.connection === 'string' && args.connection.trim() ? args.connection.trim() : undefined;
+    delete args.connection;
+    logger.info(`Calling tool: ${name}`, args, connection ? { connection } : {});
 
     const tool = toolMap.get(name);
     if (!tool) {
@@ -73,8 +78,27 @@ export async function createServer(options: ServerOptions): Promise<MCPServer> {
     }
 
     try {
+      // Server-side tools answer without a browser
+      if (tool.serverSide) {
+        return (await tool.handle(context, args)) as any;
+      }
+
+      if (connection && !context.isConnected(connection)) {
+        const open = context.listConnections().map((c) => c.connectionId).join(', ') || 'none';
+        logger.warn(`No browser connection with id ${connection}`);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `No browser connection with id "${connection}" (open: ${open}). Call browser_list_connections to see the current ones.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
       // Check if connected
-      if (!context.isConnected()) {
+      if (!context.isConnected(connection)) {
         logger.warn('Extension not connected, waiting...');
         try {
           await context.waitForConnection(10000);
@@ -89,7 +113,7 @@ export async function createServer(options: ServerOptions): Promise<MCPServer> {
         }
       }
 
-      return (await tool.handle(context, args as Record<string, unknown>)) as any;
+      return (await tool.handle(context.forConnection(connection), args)) as any;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error(`Tool error: ${name}`, message);

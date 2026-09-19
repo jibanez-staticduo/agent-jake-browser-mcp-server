@@ -87,6 +87,22 @@ export interface ToolResult {
 }
 
 /**
+ * A live browser connection as reported by browser_list_connections.
+ */
+export interface BrowserConnectionInfo {
+  connectionId: string;
+  label: string;
+  userAgent: string;
+  connectedAt: number;
+  lastActiveAt: number;
+  /** Socket currently open. */
+  open: boolean;
+  /** True for the connection that tools target when none is specified. */
+  active: boolean;
+  secondsSinceLastActivity: number;
+}
+
+/**
  * Tool schema for MCP registration.
  */
 export interface ToolSchema {
@@ -97,10 +113,19 @@ export interface ToolSchema {
 
 /**
  * Context interface for tools.
+ *
+ * `connectionId` pins a call to one browser; without it the server targets the
+ * most recently used connection.
  */
 export interface Context {
-  send(type: ToolName, payload?: Record<string, unknown>): Promise<ExtensionResponse>;
-  isConnected(): boolean;
+  send(
+    type: ToolName,
+    payload?: Record<string, unknown>,
+    connectionId?: string,
+  ): Promise<ExtensionResponse>;
+  isConnected(connectionId?: string): boolean;
+  listConnections(): BrowserConnectionInfo[];
+  waitForConnection?(timeout?: number): Promise<void>;
 }
 
 /**
@@ -108,5 +133,10 @@ export interface Context {
  */
 export interface Tool {
   schema: ToolSchema;
+  /**
+   * Server-side tools answer without a browser (e.g. browser_list_connections),
+   * so callers must not gate them on an active connection.
+   */
+  serverSide?: boolean;
   handle(context: Context, params?: Record<string, unknown>): Promise<ToolResult>;
 }
