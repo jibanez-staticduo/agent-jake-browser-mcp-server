@@ -342,8 +342,11 @@ export const fillSecretTool: Tool = createTool({
     let value: string;
     try {
       value = await readSecret(params.secretRef);
-    } catch {
-      return errorResult(`Could not read ${params.secretRef} (is 1Password unlocked on the browser machine?)`);
+    } catch (err) {
+      // stderr and exit code only: op never prints the secret there, stdout is never shown.
+      const e = err as { code?: string | number; stderr?: string };
+      const why = [e.code, (e.stderr ?? '').trim().slice(0, 300)].filter(Boolean).join(': ');
+      return errorResult(`Could not read ${params.secretRef}${why ? ` (${why})` : ''}. Is 1Password unlocked on the browser machine?`);
     }
     if (!value) return errorResult(`Empty secret at ${params.secretRef}`);
     const response = await context.send('browser_type', {
