@@ -1,0 +1,74 @@
+name: CI
+
+# DGX-309 B1: CI en GitHub sobre los PRs (auto-update de los forks).
+# El job `deltas` es el guardagias de los deltas del fork: revertir cualquiera
+# de las aserciones de scripts/check-deltas.sh es un FALLO, no un exito.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: arc-k8s
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      # El job no ejecuta el e2e de Playwright (solo tsc + vitest, criterio 1
+      # de DGX-309); saltar la descarga de navegadores del postinstall de
+      # playwright abarata el job en el runner ARC.
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # El runner arc-k8s no trae Node (imagen pelada de actions-runner, ver
+      # skill ci-runners-arc); se baja uno verificado por sha256 a RUNNER_TEMP,
+      # patron de pocharlies-org/k8s-gitops-pocharlies reusable-ci.yml.
+      - name: Install verified Node.js 22.23.2
+        run: |
+          set -euo pipefail
+          version=v22.23.2
+          case "$(uname -m)" in
+            x86_64|amd64) arch=x64; expected=b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a ;;
+            *) echo "Unsupported Node runner architecture: $(uname -m)"; exit 1 ;;
+          esac
+          archive="$RUNNER_TEMP/node-${version}-${arch}.tar.gz"
+          curl --retry 3 --retry-all-errors -fsSL \
+            "https://nodejs.org/dist/${version}/node-${version}-linux-${arch}.tar.gz" \
+            -o "$archive"
+          echo "${expected}  ${archive}" | sha256sum --check --strict
+          tar xzf "$archive" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/node-${version}-linux-${arch}/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck (tsc --noEmit)
+        run: npm run typecheck
+
+      - name: Unit tests (vitest)
+        run: npm test
+
+  deltas:
+    runs-on: arc-k8s
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Aserciones de deltas del fork (subset 1, 1b, 7b)
+        run: bash scripts/check-deltas.sh
