@@ -44,7 +44,13 @@ export type ToolName =
   | 'browser_iframe_eval'
   | 'browser_iframe_click'
   | 'browser_upload_file'
-  | 'browser_resize_viewport';
+  | 'browser_resize_viewport'
+  // DevTools-style (console/network capture, raw CDP, drop, forms)
+  | 'browser_network_requests'
+  | 'browser_network_request'
+  | 'browser_cdp'
+  | 'browser_drop'
+  | 'browser_fill_form';
 
 /**
  * Message sent to the extension via WebSocket.
