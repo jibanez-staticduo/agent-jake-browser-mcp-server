@@ -8,7 +8,9 @@ COPY package*.json ./
 RUN npm ci
 
 COPY . .
-RUN npm run build
+# a+rX: the runtime user is non-root, and a checkout made with a strict umask
+# (files 0600) would otherwise crash it with EACCES on the first import.
+RUN npm run build && chmod -R a+rX /app
 
 FROM node:22-alpine
 
