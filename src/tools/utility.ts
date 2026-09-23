@@ -90,19 +90,26 @@ export const screenshotTool: Tool = createTool({
  */
 export const getConsoleLogsTool: Tool = createTool({
   name: 'browser_get_console_logs',
-  description: 'Get console log messages from the page (log, warn, error, info).',
+  description: 'Console messages of the connected tab: console.* calls, uncaught exceptions and browser log entries (network errors, violations). Captured from CDP since the tab was connected. By default only since the last navigation.',
   schema: z.object({
-    types: z.array(z.enum(['log', 'warn', 'error', 'info', 'debug']))
+    types: z.array(z.enum(['log', 'warn', 'warning', 'error', 'info', 'debug']))
       .optional()
-      .describe('Filter by log types'),
+      .describe('Filter by exact log types'),
+    level: z.enum(['error', 'warning', 'info', 'debug'])
+      .optional()
+      .describe('Minimum severity: that level and the more severe ones'),
+    all: z.boolean().optional().default(false).describe('Include messages from before the last navigation'),
     clear: z.boolean()
       .optional()
       .default(false)
       .describe('Clear logs after retrieving'),
+    filename: z.string().optional().describe('Write the output to this file instead of returning it'),
   }),
   async handle(context, params) {
     const response = await context.send('browser_get_console_logs', {
       types: params.types,
+      level: params.level,
+      all: params.all,
       clear: params.clear,
     });
 
@@ -110,7 +117,8 @@ export const getConsoleLogsTool: Tool = createTool({
       return errorResult(response.error?.message ?? 'Get console logs failed');
     }
 
-    const rawLogs = response.result as Array<{ type: string; text: string; timestamp: number }> | { logs?: Array<{ type: string; text: string; timestamp: number }> };
+    type LogLine = { type: string; text: string; timestamp: number; location?: string };
+    const rawLogs = response.result as LogLine[] | { logs?: LogLine[] };
     const logs = Array.isArray(rawLogs) ? rawLogs : rawLogs.logs ?? [];
 
     if (logs.length === 0) {
@@ -119,10 +127,134 @@ export const getConsoleLogsTool: Tool = createTool({
 
     const formatted = logs.map(log => {
       const time = new Date(log.timestamp).toISOString();
-      return `[${time}] [${log.type.toUpperCase()}] ${log.text}`;
+      return `[${time}] [${log.type.toUpperCase()}] ${log.text}${log.location ? `  @ ${log.location}` : ''}`;
     }).join('\n');
 
-    return textResult(formatted);
+    return outputResult(formatted, params.filename);
+  },
+});
+
+/**
+ * Text result, or written to a file when the caller asked for one: long network or
+ * console dumps then cost no tokens.
+ */
+async function outputResult(text: string, filename?: string) {
+  if (!filename) return textResult(text);
+  const target = isAbsolute(filename) ? filename : resolve(outDir(), filename);
+  await mkdir(dirname(target), { recursive: true });
+  await writeFile(target, text);
+  return textResult(`Saved to ${target} (${text.length} chars)`);
+}
+
+/**
+ * Network requests of the connected tab.
+ */
+export const networkRequestsTool: Tool = createTool({
+  name: 'browser_network_requests',
+  description: 'Network requests of the connected tab, numbered [n] (stable: use them with browser_network_request). By default since the last navigation and without static resources (images, fonts, CSS, scripts). Captured from CDP since the tab was connected.',
+  schema: z.object({
+    includeStatic: z.boolean().optional().default(false).describe('Include images, fonts, stylesheets, scripts and media'),
+    all: z.boolean().optional().default(false).describe('Include requests from before the last navigation'),
+    filter: z.string().optional().describe('Case-insensitive regex on the URL'),
+    filename: z.string().optional().describe('Write the output to this file instead of returning it'),
+  }),
+  async handle(context, params) {
+    const response = await context.send('browser_network_requests', {
+      includeStatic: params.includeStatic,
+      all: params.all,
+      filter: params.filter,
+    });
+    if (!response.success) {
+      return errorResult(response.error?.message ?? 'Network requests failed');
+    }
+    const { requests = [] } = response.result as {
+      requests?: Array<{ index: number; method: string; url: string; resourceType: string; status: number | null; failure: string | null }>;
+    };
+    if (requests.length === 0) {
+      return textResult('No network requests captured');
+    }
+    const lines = requests.map(r =>
+      `[${r.index}] ${r.method} ${r.failure ? `FAILED(${r.failure})` : r.status ?? 'pending'} ${r.resourceType} ${r.url}`);
+    return outputResult(lines.join('\n'), params.filename);
+  },
+});
+
+/**
+ * One captured request in detail.
+ */
+export const networkRequestTool: Tool = createTool({
+  name: 'browser_network_request',
+  description: 'Headers and bodies of one request [n] from browser_network_requests, or only one part of it. Response bodies come from Chrome and may be gone after a navigation.',
+  schema: z.object({
+    index: z.number().int().describe('The [n] from browser_network_requests'),
+    part: z.enum(['request-headers', 'request-body', 'response-headers', 'response-body'])
+      .optional()
+      .describe('Only this part'),
+    maxBodyChars: z.number().int().min(100).optional().default(20000).describe('Truncate bodies to this length'),
+    filename: z.string().optional().describe('Write the output to this file instead of returning it'),
+  }),
+  async handle(context, params) {
+    const response = await context.send('browser_network_request', {
+      index: params.index,
+      part: params.part,
+      maxBodyChars: params.maxBodyChars,
+    });
+    if (!response.success) {
+      return errorResult(response.error?.message ?? 'Network request failed');
+    }
+    const r = response.result as Record<string, unknown>;
+    const headers = (h: unknown) => h && typeof h === 'object'
+      ? Object.entries(h as Record<string, string>).map(([k, v]) => `${k}: ${v}`).join('\n') || '(none)'
+      : '(none)';
+    const sections: string[] = [];
+    if (!params.part) {
+      sections.push(`## general\n${r.method} ${r.url}\nstatus: ${r.failure ? `FAILED ${r.failure}` : r.status ?? 'pending'}\ntype: ${r.resourceType}`);
+    }
+    if ('requestHeaders' in r) sections.push(`## request-headers\n${headers(r.requestHeaders)}`);
+    if ('requestBody' in r) sections.push(`## request-body\n${r.requestBody ?? '(empty)'}`);
+    if ('responseHeaders' in r) sections.push(`## response-headers\n${headers(r.responseHeaders)}`);
+    if ('responseBody' in r) sections.push(`## response-body\n${r.responseBody ?? '(no response)'}`);
+    return outputResult(sections.join('\n\n'), params.filename);
+  },
+});
+
+/**
+ * Node-side code with a CDP handle on the tab. Off unless the operator turns it on.
+ */
+export const runCodeUnsafeTool: Tool = createTool({
+  name: 'browser_run_code_unsafe',
+  description: 'UNSAFE — arbitrary JavaScript in the MCP server process (Node), equivalent to remote code execution on that machine. Disabled unless the server runs with AGENT_BROWSER_ALLOW_UNSAFE_CODE=1. Accepts `async (page) => { ... }` or a bare body with `page` in scope. `page.cdp(method, params)` sends a raw CDP command to the connected tab, `page.evaluate(expr)` runs JS in the page, `page.tool(name, payload)` calls any extension tool. Returns whatever the code returns.',
+  schema: z.object({
+    code: z.string().describe('`async (page) => { ... }` or a function body'),
+    filename: z.string().optional().describe('Write the output to this file instead of returning it'),
+  }),
+  async handle(context, params) {
+    if (process.env.AGENT_BROWSER_ALLOW_UNSAFE_CODE !== '1') {
+      return errorResult('browser_run_code_unsafe is disabled: start the server with AGENT_BROWSER_ALLOW_UNSAFE_CODE=1 to allow it');
+    }
+    const call = async (type: string, payload: Record<string, unknown>) => {
+      const response = await context.send(type as never, payload);
+      if (!response.success) throw new Error(response.error?.message ?? `${type} failed`);
+      return response.result;
+    };
+    const page = {
+      cdp: (method: string, cdpParams?: Record<string, unknown>) => call('browser_cdp', { method, params: cdpParams }),
+      evaluate: (code: string) => call('browser_evaluate', { code }),
+      tool: (name: string, payload: Record<string, unknown> = {}) => call(name, payload),
+    };
+    const src = params.code.trim();
+    const isFunction = /^(async\s+)?(function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/.test(src);
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-implied-eval
+      const fn = isFunction
+        ? new Function(`return (${src});`)()
+        : new Function('page', `return (async () => { ${src} })();`);
+      const result = await fn(page);
+      if (result === undefined) return textResult('(ok)');
+      return outputResult(typeof result === 'string' ? result : JSON.stringify(result, null, 2), params.filename);
+    } catch (error) {
+      return errorResult(`run_code failed: ${(error as Error).message}`);
+    }
   },
 });
 
@@ -303,6 +435,9 @@ export const utilityTools: Tool[] = [
   screenshotTool,
   pdfTool,
   getConsoleLogsTool,
+  networkRequestsTool,
+  networkRequestTool,
+  runCodeUnsafeTool,
   evaluateTool,
   resizeViewportTool,
   getHtmlTool,
