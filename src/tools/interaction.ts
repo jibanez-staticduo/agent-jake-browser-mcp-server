@@ -4,6 +4,8 @@
 import { z } from 'zod';
 import { readFile } from 'node:fs/promises';
 import { basename, extname } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { createTool, textResult, errorResult } from './types.js';
 import type { Tool } from '../types.js';
 
@@ -311,6 +313,53 @@ export const fillFormTool: Tool = createTool({
   },
 });
 
+/**
+ * Read a secret from 1Password ON THIS MACHINE and type it into a field. The value never
+ * reaches the model: it is not in the tool arguments, the result, or the server log, and
+ * the extension redacts it from its activity log (payload flag `secret`).
+ * The reader is `op read <ref>`; AGENT_BROWSER_OP_BIN points to another binary with the
+ * same contract (e.g. a wrapper that unlocks through the desktop app).
+ */
+export async function readSecret(ref: string): Promise<string> {
+  const bin = process.env.AGENT_BROWSER_OP_BIN || 'op';
+  const { stdout } = await promisify(execFile)(bin, ['read', ref], { timeout: 60000 });
+  return stdout.replace(/\r?\n$/, '');
+}
+
+export const fillSecretTool: Tool = createTool({
+  name: 'browser_fill_secret',
+  description: 'Type a secret from 1Password (op://vault/item/field) into a field. The value is read on the browser machine and never appears in arguments, results or logs. Use it for passwords, never browser_type.',
+  schema: z.object({
+    ref: z.string().optional().describe('Element reference from browser_state/snapshot'),
+    selector: z.string().optional().describe('CSS selector to find the element'),
+    secretRef: z.string().regex(/^op:\/\//, 'secretRef must be an op:// reference').describe('1Password secret reference, op://vault/item/field'),
+    clear: z.boolean().optional().default(true).describe('Clear existing text before typing'),
+  }).refine(
+    data => data.ref || data.selector,
+    { message: 'Either ref or selector must be provided' }
+  ),
+  async handle(context, params) {
+    let value: string;
+    try {
+      value = await readSecret(params.secretRef);
+    } catch {
+      return errorResult(`Could not read ${params.secretRef} (is 1Password unlocked on the browser machine?)`);
+    }
+    if (!value) return errorResult(`Empty secret at ${params.secretRef}`);
+    const response = await context.send('browser_type', {
+      ref: params.ref,
+      selector: params.selector,
+      text: value,
+      clear: params.clear,
+      secret: true,
+    });
+    if (!response.success) {
+      return errorResult(response.error?.message ?? 'Fill secret failed');
+    }
+    return textResult(`Filled ${params.ref ?? params.selector} with ${params.secretRef} (${value.length} chars)`);
+  },
+});
+
 export const interactionTools: Tool[] = [
   clickTool,
   typeTool,
@@ -321,4 +370,5 @@ export const interactionTools: Tool[] = [
   uploadFileTool,
   dropTool,
   fillFormTool,
+  fillSecretTool,
 ];
