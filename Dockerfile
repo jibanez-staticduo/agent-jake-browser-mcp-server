@@ -12,6 +12,14 @@ COPY . .
 # (files 0600) would otherwise crash it with EACCES on the first import.
 RUN npm run build && chmod -R a+rX /app
 
+# 1Password CLI for browser_fill_secret (reads op:// with OP_SERVICE_ACCOUNT_TOKEN).
+FROM alpine:3.22 AS opcli
+ARG OP_VERSION=2.39.0
+ARG TARGETARCH=amd64
+RUN apk add --no-cache curl unzip \
+  && curl -fsSLo /tmp/op.zip "https://cache.agilebits.com/dist/1P/op2/pkg/v${OP_VERSION}/op_linux_${TARGETARCH}_v${OP_VERSION}.zip" \
+  && unzip -q /tmp/op.zip op -d /usr/local/bin && chmod 0755 /usr/local/bin/op
+
 FROM node:22-alpine
 
 ENV TZ=Europe/Madrid     NODE_ENV=production
@@ -19,6 +27,7 @@ ENV TZ=Europe/Madrid     NODE_ENV=production
 WORKDIR /app
 
 RUN apk add --no-cache tini
+COPY --from=opcli /usr/local/bin/op /usr/local/bin/op
 
 COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/dist ./dist
