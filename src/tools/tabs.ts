@@ -28,8 +28,9 @@ export const newTabTool: Tool = createTool({
       return errorResult(response.error?.message ?? 'New tab failed');
     }
 
-    const result = response.result as { tabId: number };
-    return textResult(`Opened new tab (id: ${result.tabId}) with ${params.url}`);
+    // The extension answers { tab: { id, ... } }; older builds answered { tabId }.
+    const result = response.result as { tab?: { id?: number }; tabId?: number };
+    return textResult(`Opened new tab (id: ${result.tab?.id ?? result.tabId}) with ${params.url}`);
   },
 });
 
