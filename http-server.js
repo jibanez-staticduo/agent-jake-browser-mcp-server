@@ -11,6 +11,7 @@ import { getAllTools } from './src/tools/index.ts';
 import { getSharedTokenStore } from './src/token-store.ts';
 import { createPairingStore } from './src/pairing-store.ts';
 import { patchZipConfig } from './src/extension-zip.ts';
+import { parseLabels, nameOf, resolveTarget } from './src/connection-target.ts';
 
 const PORT = Number(process.env.MCP_HTTP_PORT || 8000);
 const WS_PORT = Number(process.env.BROWSER_WS_PORT || 8765);
@@ -22,8 +23,17 @@ const WS_PATH = process.env.BROWSER_WS_PATH || '/';
 const CONNECTION_FIELD = {
   type: 'string',
   description:
-    'Browser connection id to target; defaults to the most recently used. See browser_list_connections.',
+    'Browser to drive: a connection id or its name (e.g. "mac", "x86"). Once given, it sticks for the rest of this MCP session. Without it: this session\'s choice, else the configured default. See browser_list_connections.',
 };
+
+// Browser choice per MCP session (see src/connection-target.ts). Names: connectionId -> name.
+const CONNECTION_LABELS = parseLabels(process.env.AGENT_BROWSER_CONNECTION_LABELS);
+const DEFAULT_CONNECTION = (process.env.AGENT_BROWSER_DEFAULT_CONNECTION || '').trim() || undefined;
+const sessionDefaults = new Map();
+
+function openConnections() {
+  return context.listConnections().filter((c) => c.open !== false);
+}
 
 const app = express();
 app.use(express.json());
@@ -74,28 +84,35 @@ function textContent(text, isError) {
  * Resolve the target browser, run the tool against that connection and keep
  * `connection` out of the arguments sent to the extension.
  */
-async function callTool(name, rawArgs) {
+async function callTool(name, rawArgs, sessionId) {
   const tool = toolMap.get(name);
   if (!tool) return textContent(`Unknown tool: ${name}`, true);
 
   const args = { ...(rawArgs ?? {}) };
-  const connection =
+  const requested =
     typeof args.connection === 'string' && args.connection.trim() ? args.connection.trim() : undefined;
   delete args.connection;
+
+  if (name === 'browser_list_connections') {
+    const mine = sessionId ? sessionDefaults.get(sessionId) : undefined;
+    const rows = context.listConnections().map((c) => ({
+      name: nameOf(c, CONNECTION_LABELS) || null,
+      connectionId: c.connectionId,
+      open: c.open,
+      userAgent: c.userAgent,
+      secondsSinceLastActivity: c.secondsSinceLastActivity,
+      thisSession: c.connectionId === mine,
+      configuredDefault: !!DEFAULT_CONNECTION &&
+        [c.connectionId, nameOf(c, CONNECTION_LABELS)].some((v) => v && v.toLowerCase() === DEFAULT_CONNECTION.toLowerCase()),
+    }));
+    return textContent(JSON.stringify(rows, null, 2));
+  }
 
   if (tool.serverSide) {
     return tool.handle(context, args);
   }
 
-  if (connection && !context.isConnected(connection)) {
-    const open = context.listConnections().map((c) => c.connectionId).join(', ') || 'none';
-    return textContent(
-      `No browser connection with id "${connection}" (open: ${open}). Call browser_list_connections to see the current ones.`,
-      true,
-    );
-  }
-
-  if (!context.isConnected(connection)) {
+  if (!requested && !openConnections().length) {
     try {
       await context.waitForConnection(10000);
     } catch {
@@ -106,7 +123,17 @@ async function callTool(name, rawArgs) {
     }
   }
 
-  return tool.handle(context.forConnection(connection), args);
+  const target = resolveTarget({
+    requested,
+    sessionDefault: sessionId ? sessionDefaults.get(sessionId) : undefined,
+    configuredDefault: DEFAULT_CONNECTION,
+    open: openConnections(),
+    labels: CONNECTION_LABELS,
+  });
+  if (!target.ok) return textContent(target.error, true);
+  if (target.sticky && sessionId) sessionDefaults.set(sessionId, target.connectionId);
+
+  return tool.handle(context.forConnection(target.connectionId), args);
 }
 
 function createMcpServer() {
@@ -119,8 +146,8 @@ function createMcpServer() {
     tools: toolsListPayload(),
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) =>
-    callTool(request.params.name, request.params.arguments),
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) =>
+    callTool(request.params.name, request.params.arguments, extra?.sessionId),
   );
 
   return server;
@@ -340,6 +367,7 @@ app.post('/mcp', async (req, res) => {
         if (transport.sessionId) {
           transports.delete(transport.sessionId);
           servers.delete(transport.sessionId);
+          sessionDefaults.delete(transport.sessionId);
         }
       };
       const server = createMcpServer();
