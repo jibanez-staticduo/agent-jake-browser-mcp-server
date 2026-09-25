@@ -236,10 +236,23 @@ describe('pairing web', () => {
     expect(res.status).toBe(400);
   });
 
-  it('answers CORS preflights', async () => {
-    const res = await request(primary, 'OPTIONS', '/pair/approve');
-    expect(res.status).toBe(204);
-    expect(res.headers.get('access-control-allow-origin')).toBe('*');
+  it('allows extension pairing CORS without exposing approval or connections', async () => {
+    const origin = `chrome-extension://${'a'.repeat(32)}`;
+    for (const path of ['/pair/start', '/pair/status']) {
+      const res = await request(primary, 'OPTIONS', path, { headers: { Origin: origin } });
+      expect(res.status).toBe(204);
+      expect(res.headers.get('access-control-allow-origin')).toBe(origin);
+    }
+    const denied = await request(primary, 'OPTIONS', '/pair/start', {
+      headers: { Origin: 'https://untrusted.example' },
+    });
+    expect(denied.status).toBe(403);
+    expect(denied.headers.get('access-control-allow-origin')).toBeNull();
+
+    for (const path of ['/pair/approve', '/connections']) {
+      const res = await request(primary, 'OPTIONS', path, { headers: { Origin: origin } });
+      expect(res.headers.get('access-control-allow-origin')).toBeNull();
+    }
   });
 
   it('starts pending, approves once and reports status', async () => {
