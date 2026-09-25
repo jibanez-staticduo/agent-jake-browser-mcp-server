@@ -42,11 +42,21 @@ describe('deploy/k8s manifests', () => {
     const paths = [...ingress.matchAll(/^\s+- path: (\S+)\s*\n\s+pathType: (\S+)/gm)]
       .map((match) => [match[1], match[2]]);
     expect(paths).toEqual([
-      ['/ws', 'Prefix'], ['/', 'Exact'], ['/download', 'Exact'],
+      ['/ws', 'Prefix'], ['/download', 'Exact'],
       ['/connections', 'Exact'], ['/pair', 'Exact'], ['/pair/start', 'Exact'],
       ['/pair/approve', 'Exact'], ['/pair/status', 'Exact'],
     ]);
+    // ingress-nginx may reinterpret Exact / as regex ^/ if any Ingress on the
+    // same host uses use-regex or rewrite-target. That would also match /mcp.
+    expect(paths.some(([path]) => path === '/' || path === '/mcp')).toBe(false);
     expect(ingress).toContain('nginx.ingress.kubernetes.io/enable-access-log: "false"');
+  });
+
+  it('labels the MCP client Deployment template instead of a disposable pod', () => {
+    const instructions = read('README.md');
+    expect(instructions).toContain('patch deployment <agent-deployment>');
+    expect(instructions).toContain('agent-jake-browser/client');
+    expect(instructions).not.toMatch(/^kubectl label pod /m);
   });
 
   it('keeps the WebSocket authenticated by default', () => {

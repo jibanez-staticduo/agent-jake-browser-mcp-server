@@ -35,8 +35,10 @@ docker push <registry>/agent-jake-browser-mcp-server:<tag>
 #    - networkpolicy.yaml : your ingress controller's namespace and pod labels
 #    Label a trusted agent namespace (not the browser or ingress namespace):
 kubectl label namespace <agent-namespace> agent-jake-browser/mcp-client-namespace=true
-#    Label only the MCP client pods in that namespace:
-kubectl label pod -n <agent-namespace> <agent-pod> agent-jake-browser/client=true
+#    Persist the client label on its Deployment pod template. This rolls its
+#    pods; a one-off `kubectl label pod` disappears at replacement.
+kubectl -n <agent-namespace> patch deployment <agent-deployment> --type merge \
+  -p '{"spec":{"template":{"metadata":{"labels":{"agent-jake-browser/client":"true"}}}}}'
 
 # 3. Apply
 kubectl apply -k deploy/k8s
@@ -78,8 +80,14 @@ Only trusted cluster administrators should be able to set the namespace label.
 Anyone who can create labelled pods in an allowed namespace can reach `/mcp`;
 the labels are an access control boundary, not client authentication. Verify
 your namespace RBAC and admission policies before using this with other tenants.
-The Ingress exposes only the exact browser routes and `/ws`; never add a `/`
-prefix catch-all or `/mcp` route without separate MCP authentication.
+The Ingress exposes only named browser routes and `/ws`; `/` is deliberately
+absent, so the landing page is internal only. Use `/pair` for browser setup.
+Never add `/`, `/mcp`, or a catch-all route without separate MCP authentication.
+Use a dedicated host: ingress-nginx may reinterpret even `Exact` paths as
+regular expressions when any Ingress on the same host uses `use-regex` or
+`rewrite-target`. Audit all Ingress objects for this host and prevent other
+teams from adding conflicting routes. See the
+[ingress-nginx path matching warning](https://kubernetes.github.io/ingress-nginx/user-guide/ingress-path-matching/#warning).
 
 Two ways that goes wrong quietly:
 
