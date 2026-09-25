@@ -31,8 +31,8 @@ spec:
     - Ingress
   ingress:
     - from:
-        # Label the pods that are allowed to drive the browser, and only those:
-        #   kubectl label pod/<agent> agent-jake-browser/client=true
+        # Label the Pod template of each trusted client workload, so its
+        # replacement pods keep agent-jake-browser/client=true.
         # An empty `from` here would mean "the whole cluster", which is what
         # this file exists to prevent.
         # Label only namespaces whose administrators may create MCP clients.
