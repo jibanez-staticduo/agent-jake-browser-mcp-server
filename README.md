@@ -138,12 +138,12 @@ server-side output files currently require Linux (`/proc/self/fd`); they fail
 closed on other platforms. Data-only drops and inline tool results still work.
 
 `browser_network_request` returns metadata and headers by default. Only values
-of common diagnostic headers (`accept`, `cache-control`, `content-encoding`,
-`content-length`, `content-type`, `date`, `server`, `vary`) remain visible; other
-header values are redacted. Network URLs hide userinfo, query values and
-fragments. Request or response bodies require an explicit `part` because they
-can contain credentials or private form data. Custom headers and path segments
-can still carry private data, so use these tools only with trusted MCP clients.
+of `content-type` (MIME type only), `content-length` (digits only), and
+`cache-control` (known directives only) remain visible; other header values
+are redacted. Network URLs show only the origin, never the path, query,
+userinfo or fragment. Request or response bodies require an explicit `part`
+because they can contain credentials or private form data. Custom header names
+can also carry private data, so use these tools only with trusted MCP clients.
 
 ### HTTP surface
 

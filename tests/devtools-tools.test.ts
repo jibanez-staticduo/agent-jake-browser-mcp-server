@@ -42,15 +42,15 @@ describe('devtools tools', () => {
     ] }));
     const r = await tool('browser_network_requests').handle(context, { filter: 'x\\.test' });
     expect(sent[0]).toEqual({ type: 'browser_network_requests', payload: { includeStatic: false, all: false, filter: 'x\\.test' } });
-    expect(text(r)).toBe('[4] POST 201 Fetch https://x.test/api\n[7] GET FAILED(net::ERR_FAILED) XHR https://x.test/down');
+    expect(text(r)).toBe('[4] POST 201 Fetch https://x.test\n[7] GET FAILED(net::ERR_FAILED) XHR https://x.test');
   });
 
-  it('redacts credentials and query values from network URLs', async () => {
+  it('shows only the origin of network URLs, including token-bearing paths', async () => {
     const { context } = fakeContext(() => ({ requests: [
-      { index: 1, method: 'GET', url: 'https://user:password@x.test/api?token=test-secret&session=test-secret#access_token=test-secret', resourceType: 'XHR', status: 200, failure: null },
+      { index: 1, method: 'GET', url: 'https://user:password@x.test/reset/test-secret?token=test-secret#access_token=test-secret', resourceType: 'XHR', status: 200, failure: null },
     ] }));
     const result = await tool('browser_network_requests').handle(context, {});
-    expect(text(result)).toContain('https://%5BREDACTED%5D:%5BREDACTED%5D@x.test/api?token=');
+    expect(text(result)).toBe('[1] GET 200 XHR https://x.test');
     expect(text(result)).not.toContain('test-secret');
     expect(text(result)).not.toContain('password');
   });
@@ -81,9 +81,9 @@ describe('devtools tools', () => {
 
   it('redacts network headers and omits bodies by default', async () => {
     const { context } = fakeContext(() => ({
-      method: 'GET', url: 'https://x.test/', status: 200, resourceType: 'XHR',
-      requestHeaders: { Authorization: 'Bearer test-secret', Cookie: 'test-secret', 'X-Session-ID': 'test-secret', X_AuthToken: 'test-secret' },
-      responseHeaders: { 'Set-Cookie': 'test-secret', 'X-Access-Key': 'test-secret' },
+      method: 'GET', url: 'https://x.test/reset/test-secret?token=test-secret', status: 200, resourceType: 'XHR',
+      requestHeaders: { Authorization: 'Bearer test-secret', Cookie: 'test-secret', 'X-Session-ID': 'test-secret', X_AuthToken: 'test-secret', Referer: 'https://x.test/reset/test-secret', 'Content-Type': 'text/html; boundary=test-secret', 'Content-Length': '123' },
+      responseHeaders: { 'Set-Cookie': 'test-secret', 'X-Access-Key': 'test-secret', Location: 'https://x.test/reset/test-secret', 'X-Client-Secret': 'test-secret', 'Cache-Control': 'public, max-age=60' },
       requestBody: 'test-secret', responseBody: 'test-secret',
     }));
     const result = await tool('browser_network_request').handle(context, { index: 1 });
@@ -93,9 +93,31 @@ describe('devtools tools', () => {
     expect(text(result)).toContain('X-Session-ID: [REDACTED]');
     expect(text(result)).toContain('X_AuthToken: [REDACTED]');
     expect(text(result)).toContain('X-Access-Key: [REDACTED]');
+    expect(text(result)).toContain('Referer: [REDACTED]');
+    expect(text(result)).toContain('Location: [REDACTED]');
+    expect(text(result)).toContain('X-Client-Secret: [REDACTED]');
+    expect(text(result)).toContain('Content-Type: text/html');
+    expect(text(result)).toContain('Content-Length: 123');
+    expect(text(result)).toContain('Cache-Control: public, max-age=60');
+    expect(text(result)).toContain('GET https://x.test');
     expect(text(result)).not.toContain('test-secret');
     expect(text(result)).not.toContain('## request-body');
     expect(text(result)).not.toContain('## response-body');
+  });
+
+  it('redacts unsafe values even under diagnostic header names', async () => {
+    const { context } = fakeContext(() => ({
+      requestHeaders: {
+        'Content-Type': 'test-secret',
+        'Content-Length': '12; test-secret',
+        'Cache-Control': 'private="test-secret"',
+      },
+    }));
+    const result = await tool('browser_network_request').handle(context, { index: 1, part: 'request-headers' });
+    expect(text(result)).toContain('Content-Type: [REDACTED]');
+    expect(text(result)).toContain('Content-Length: [REDACTED]');
+    expect(text(result)).toContain('Cache-Control: [REDACTED]');
+    expect(text(result)).not.toContain('test-secret');
   });
 
   it.skipIf(process.platform !== 'linux')('keeps filename writes inside the output directory and does not overwrite files', async () => {

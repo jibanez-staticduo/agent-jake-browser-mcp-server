@@ -173,19 +173,31 @@ async function outputResult(text: string, filename?: string) {
   }
 }
 
-const VISIBLE_NETWORK_HEADERS = new Set([
-  'accept', 'cache-control', 'content-encoding', 'content-length',
-  'content-type', 'date', 'server', 'vary',
-]);
+function safeNetworkHeaderValue(name: string, value: string): string {
+  if (typeof value !== 'string') return '[REDACTED]';
+  const trimmed = value.trim();
+  switch (name.toLowerCase()) {
+    case 'content-type': {
+      const mime = /^([a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+)(?:\s*;.*)?$/i.exec(trimmed);
+      return mime?.[1] && trimmed.length <= 256 ? mime[1].toLowerCase() : '[REDACTED]';
+    }
+    case 'content-length':
+      return /^\d{1,20}$/.test(trimmed) ? trimmed : '[REDACTED]';
+    case 'cache-control': {
+      if (trimmed.length > 256) return '[REDACTED]';
+      const directives = trimmed.split(',').map(part => part.trim().toLowerCase());
+      const safe = /^(?:no-cache|no-store|public|private|must-revalidate|proxy-revalidate|immutable|(?:s-maxage|max-age|stale-while-revalidate|stale-if-error)=\d{1,12})$/;
+      return directives.every(part => safe.test(part)) ? directives.join(', ') : '[REDACTED]';
+    }
+    default:
+      return '[REDACTED]';
+  }
+}
 
 function redactNetworkUrl(raw: string): string {
   try {
     const url = new URL(raw);
-    if (url.username) url.username = '[REDACTED]';
-    if (url.password) url.password = '[REDACTED]';
-    for (const key of new Set(url.searchParams.keys())) url.searchParams.set(key, '[REDACTED]');
-    url.hash = '';
-    return url.toString();
+    return ['http:', 'https:', 'ws:', 'wss:'].includes(url.protocol) ? url.origin : '[opaque URL]';
   } catch {
     return '[unparseable URL]';
   }
@@ -250,7 +262,7 @@ export const networkRequestTool: Tool = createTool({
     const r = response.result as Record<string, unknown>;
     const headers = (h: unknown) => h && typeof h === 'object'
       ? Object.entries(h as Record<string, string>).map(([k, v]) =>
-        `${k}: ${VISIBLE_NETWORK_HEADERS.has(k.toLowerCase()) ? v : '[REDACTED]'}`,
+        `${k}: ${safeNetworkHeaderValue(k, v)}`,
       ).join('\n') || '(none)'
       : '(none)';
     const sections: string[] = [];
