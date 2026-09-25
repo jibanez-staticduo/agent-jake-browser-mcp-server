@@ -2,8 +2,9 @@
  * Utility tools: wait, screenshot, getConsoleLogs, evaluate, resizeViewport.
  */
 import { z } from 'zod';
-import { mkdir, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { constants } from 'node:fs';
+import { mkdir, open, realpath } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createTool, textResult, imageResult, errorResult } from './types.js';
 import type { Tool } from '../types.js';
@@ -138,12 +139,33 @@ export const getConsoleLogsTool: Tool = createTool({
  * Text result, or written to a file when the caller asked for one: long network or
  * console dumps then cost no tokens.
  */
+async function saveOutput(content: string | Buffer, filename: string): Promise<string> {
+  await mkdir(outDir(), { recursive: true });
+  const root = await realpath(outDir());
+  const name = basename(filename);
+  if (!name || name === '.' || name === '..' || name.includes('\\') ||
+      (!isAbsolute(filename) && filename !== name) ||
+      (isAbsolute(filename) && dirname(filename) !== root)) {
+    throw new Error('Output filename must be directly inside AGENT_BROWSER_OUT_DIR');
+  }
+  const target = join(root, name);
+  const handle = await open(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try {
+    await handle.writeFile(content);
+  } finally {
+    await handle.close();
+  }
+  return target;
+}
+
 async function outputResult(text: string, filename?: string) {
   if (!filename) return textResult(text);
-  const target = isAbsolute(filename) ? filename : resolve(outDir(), filename);
-  await mkdir(dirname(target), { recursive: true });
-  await writeFile(target, text);
-  return textResult(`Saved to ${target} (${text.length} chars)`);
+  try {
+    const target = await saveOutput(text, filename);
+    return textResult(`Saved to ${target} (${text.length} chars)`);
+  } catch (error) {
+    return errorResult(`Cannot save output: ${(error as Error).message}`);
+  }
 }
 
 /**
@@ -418,15 +440,13 @@ export const pdfTool: Tool = createTool({
       return errorResult('The extension returned no PDF');
     }
 
-    const target = params.path
-      ? (isAbsolute(params.path) ? params.path : resolve(outDir(), params.path))
-      : resolve(outDir(), `agent-browser-${Date.now()}.pdf`);
-
     const bytes = Buffer.from(base64, 'base64');
-    await mkdir(dirname(target), { recursive: true });
-    await writeFile(target, bytes);
-
-    return textResult(`PDF saved to ${target} (${bytes.length} bytes)`);
+    try {
+      const target = await saveOutput(bytes, params.path ?? `agent-browser-${Date.now()}.pdf`);
+      return textResult(`PDF saved to ${target} (${bytes.length} bytes)`);
+    } catch (error) {
+      return errorResult(`Cannot save PDF: ${(error as Error).message}`);
+    }
   },
 });
 

@@ -122,3 +122,8 @@ in `configmap.yaml`, and the image in `kustomization.yaml`.
 With neither `BROWSER_WS_TOKEN` nor `BROWSER_ALLOW_PAIRING` set, the WebSocket
 accepts any client. The Deployment sets `BROWSER_ALLOW_PAIRING=true` so that
 cannot happen by omission.
+
+`AGENT_BROWSER_ALLOW_UNSAFE_CODE` is unset in this Deployment. Leave it disabled:
+setting it to `1` lets an MCP caller execute code inside the pod. File drops are
+also disabled until `AGENT_BROWSER_DROP_DIR` points to a directory containing only
+files approved for transfer to a browser tab.
