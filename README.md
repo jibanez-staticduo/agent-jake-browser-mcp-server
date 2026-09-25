@@ -127,7 +127,23 @@ also works while nothing is connected.
 | `BROWSER_WS_PATH` | `/` | Path advertised to the extension, for proxies that map the socket to a subpath. |
 | `MCP_HTTP_HOST` / `MCP_HTTP_PORT` | `127.0.0.1` / `8000` | MCP streamable HTTP endpoint. |
 | `BROWSER_PUBLIC_ORIGIN` | derived | Origin used to build the approval link returned by `/pair/start`. Set it when the proxy host is not derivable from the request. |
-| `AGENT_BROWSER_OUT_DIR` | system temp dir | Where `browser_pdf` and `browser_screenshot` write their files. |
+| `AGENT_BROWSER_OUT_DIR` | system temp dir | Where `browser_pdf` and tool results saved with `filename` write their files. |
+| `AGENT_BROWSER_DROP_DIR` | unset (file drops disabled) | Directory of files available to `browser_drop`. Files must be direct children, with no symlinks; maximum 8 files and 10 MiB total per call. Mount only files intended for browser upload. MIME data-only drops remain available with a 1 MiB limit. |
+| `AGENT_BROWSER_ALLOW_UNSAFE_CODE` | unset (disabled) | Set exactly `1` to enable `browser_run_code_unsafe`, which executes arbitrary JavaScript in the MCP server process. Only use it with fully trusted MCP clients. |
+
+PDFs and network or console results written with a path must be direct children of
+`AGENT_BROWSER_OUT_DIR` (or the system temp directory by default). Existing files
+are never overwritten; choose a new name for each result. Secure file drops and
+server-side output files currently require Linux (`/proc/self/fd`); they fail
+closed on other platforms. Data-only drops and inline tool results still work.
+
+`browser_network_request` returns metadata and headers by default. Only values
+of `content-type` (MIME type only), `content-length` (digits only), and
+`cache-control` (known directives only) remain visible; other header values
+are redacted. Network URLs show only the origin, never the path, query,
+userinfo or fragment. Request or response bodies require an explicit `part`
+because they can contain credentials or private form data. Custom header names
+can also carry private data, so use these tools only with trusted MCP clients.
 
 ### HTTP surface
 
