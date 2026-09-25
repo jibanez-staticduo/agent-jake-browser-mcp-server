@@ -27,6 +27,7 @@ export type ToolName =
   | 'browser_wait'
   | 'browser_screenshot'
   | 'browser_pdf'
+  | 'browser_reload_extension'
   | 'browser_get_console_logs'
   // Tab management
   | 'browser_new_tab'

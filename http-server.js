@@ -11,7 +11,7 @@ import { getAllTools } from './src/tools/index.ts';
 import { getSharedTokenStore } from './src/token-store.ts';
 import { createPairingStore } from './src/pairing-store.ts';
 import { patchZipConfig } from './src/extension-zip.ts';
-import { parseLabels, nameOf, resolveTarget } from './src/connection-target.ts';
+import { parseLabels, nameOf, resolveTarget, findConnection } from './src/connection-target.ts';
 
 const PORT = Number(process.env.MCP_HTTP_PORT || 8000);
 const WS_PORT = Number(process.env.BROWSER_WS_PORT || 8765);
@@ -345,6 +345,38 @@ function publicOrigin(req) {
   const host = String(req.headers['x-forwarded-host'] || req.headers.host || `127.0.0.1:${PORT}`);
   return `${forwardedProto || req.protocol || 'http'}://${host}`;
 }
+
+/**
+ * Reload an extension from disk after a deploy replaced its unpacked build: no Chrome
+ * debugging port, no screen, no human. Deliberately NOT an MCP tool (agents never need it)
+ * and loopback-only: deploys reach it with `kubectl exec ... curl 127.0.0.1:8000`; the
+ * IngressRoute does not publish it and the gateway only proxies /mcp.
+ * Body: {"connection": "<id or name>"}. Answers once the browser has reconnected.
+ */
+const isLoopback = (req) => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress);
+
+app.post('/extension/reload', async (req, res) => {
+  if (!isLoopback(req)) return res.status(403).json({ ok: false, error: 'loopback only' });
+  const wanted = String(req.body?.connection || '').trim();
+  if (!wanted) return res.status(400).json({ ok: false, error: 'connection (id or name) is required' });
+  const hit = findConnection(wanted, openConnections(), CONNECTION_LABELS);
+  if (!hit) return res.status(404).json({ ok: false, error: `no open connection "${wanted}"` });
+
+  const before = Date.now();
+  try {
+    const answer = await context.forConnection(hit.connectionId).send('browser_reload_extension', {});
+    if (!answer.success) return res.status(502).json({ ok: false, error: answer.error?.message || 'reload refused' });
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: String(err?.message || err) });
+  }
+  const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 60000, 180000);
+  for (let waited = 0; waited < timeoutMs; waited += 500) {
+    await new Promise((r) => setTimeout(r, 500));
+    const back = context.listConnections().find((c) => c.connectionId === hit.connectionId && c.open !== false && c.connectedAt > before);
+    if (back) return res.json({ ok: true, connectionId: hit.connectionId, name: nameOf(back, CONNECTION_LABELS) || null, reconnectedAfterMs: back.connectedAt - before });
+  }
+  return res.status(504).json({ ok: false, error: `reload sent but ${wanted} did not reconnect within ${timeoutMs} ms` });
+});
 
 app.post('/mcp', async (req, res) => {
   try {
