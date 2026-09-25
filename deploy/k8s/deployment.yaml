@@ -61,10 +61,11 @@ spec:
               value: "8000"
             - name: BROWSER_WS_PORT
               value: "8765"
-            # Tokens and anything a tool writes (browser_pdf, screenshots) go to
-            # the one writable volume, since the root filesystem is read-only.
+            # Tokens, the extension ZIP and tool output live on the writable PVC.
             - name: BROWSER_TOKEN_STORE
               value: /data/tokens.json
+            - name: BROWSER_EXTENSION_ZIP
+              value: /data/agent-jake-browser-extension.zip
             - name: AGENT_BROWSER_OUT_DIR
               value: /data/out
             # Accept tokens minted by the pairing page. Turn this off and set

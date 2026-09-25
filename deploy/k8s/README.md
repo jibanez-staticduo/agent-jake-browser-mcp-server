@@ -32,12 +32,27 @@ docker push <registry>/agent-jake-browser-mcp-server:<tag>
 #    - kustomization.yaml : images[].name / newTag
 #    - configmap.yaml     : publicWsUrl, publicOrigin
 #    - ingress.yaml       : host, class, TLS (or delete it)
-#    - networkpolicy.yaml : the namespace your ingress controller runs in
+#    - networkpolicy.yaml : your ingress controller's namespace and pod labels
+#    Label a trusted agent namespace (not the browser or ingress namespace):
+kubectl label namespace <agent-namespace> agent-jake-browser/mcp-client-namespace=true
+#    Label only the MCP client pods in that namespace:
+kubectl label pod -n <agent-namespace> <agent-pod> agent-jake-browser/client=true
 
 # 3. Apply
 kubectl apply -k deploy/k8s
 
-# 4. Pair a browser
+# 4. Build the extension separately. Zip the CONTENTS of its dist directory,
+#    with manifest.json at the archive root. The server image does not contain
+#    this sibling project. Copy the ZIP to the persistent volume and repeat
+#    after updating the extension.
+(cd ../agent-jake-browser-mcp-extension && npm ci && npm run build && \
+  cd dist && zip -qr ../agent-jake-browser-extension.zip .)
+kubectl -n agent-jake-browser cp \
+  ../agent-jake-browser-mcp-extension/agent-jake-browser-extension.zip \
+  <agent-jake-browser-pod>:/data/agent-jake-browser-extension.zip
+#    Check that /download returns 200 and a ZIP with config.json before pairing.
+
+# 5. Pair a browser
 #    Install the extension, start pairing in its popup, then approve the code at
 #    https://<your-host>/pair
 ```
@@ -53,10 +68,18 @@ reachable by nothing, so this deployment binds `0.0.0.0` — and the protection
 that loopback was providing has to come from somewhere else.
 
 Here it comes from `networkpolicy.yaml`: deny everything, then allow port 8000
-only from pods you have labelled `agent-jake-browser/client=true`. Treat that
+only from pods labelled `agent-jake-browser/client=true` in namespaces labelled
+`agent-jake-browser/mcp-client-namespace=true`. Treat that
 file as part of the deployment, not as optional hardening. Applied without it,
 any pod in the cluster can drive a browser holding your logged-in sessions —
 your mail, your bank, everything the browser is signed into.
+
+Only trusted cluster administrators should be able to set the namespace label.
+Anyone who can create labelled pods in an allowed namespace can reach `/mcp`;
+the labels are an access control boundary, not client authentication. Verify
+your namespace RBAC and admission policies before using this with other tenants.
+The Ingress exposes only the exact browser routes and `/ws`; never add a `/`
+prefix catch-all or `/mcp` route without separate MCP authentication.
 
 Two ways that goes wrong quietly:
 
@@ -64,8 +87,12 @@ Two ways that goes wrong quietly:
   Then these files apply cleanly, report nothing, and enforce nothing. Check with
   a pod that should be denied before you trust it.
 - **You expose the Ingress publicly.** `/pair/approve` mints a real browser token
-  for anyone presenting a valid pairing code, and it answers cross-origin. Keep
-  the host on a private network or behind a proxy that authenticates.
+  for anyone presenting a valid pairing code. Keep the host on a private network
+  or behind a proxy that authenticates. Only `/pair/start` and `/pair/status`
+  grant CORS to Chrome extension origins; the approval response does not.
+- **Your proxy logs full request URLs.** `/ws?token=` and `/pair/status?otp=` carry
+  credentials. The example disables ingress-nginx access logs for this Ingress;
+  disable or redact URL logging in any upstream proxy too.
 
 ## Why one replica
 

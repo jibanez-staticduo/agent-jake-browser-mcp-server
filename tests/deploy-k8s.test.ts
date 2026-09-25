@@ -31,6 +31,22 @@ describe('deploy/k8s manifests', () => {
     expect(policy).toContain('agent-jake-browser-default-deny');
     // And the MCP port must never be opened to an unqualified source.
     expect(policy).toMatch(/agent-jake-browser\/client:\s*"true"/);
+    expect(policy).toMatch(/agent-jake-browser\/mcp-client-namespace:\s*"true"/);
+    expect(policy).not.toContain('namespaceSelector: {}');
+    expect(policy).toMatch(/agent-jake-browser-allow-public-routes-from-ingress[\s\S]*port:\s*8000/);
+    expect(policy).toMatch(/kubernetes.io\/metadata.name:\s*ingress-nginx[\s\S]*app.kubernetes.io\/name:\s*ingress-nginx/);
+  });
+
+  it('publishes only the browser routes and never the MCP endpoint', () => {
+    const ingress = read('ingress.yaml');
+    const paths = [...ingress.matchAll(/^\s+- path: (\S+)\s*\n\s+pathType: (\S+)/gm)]
+      .map((match) => [match[1], match[2]]);
+    expect(paths).toEqual([
+      ['/ws', 'Prefix'], ['/', 'Exact'], ['/download', 'Exact'],
+      ['/connections', 'Exact'], ['/pair', 'Exact'], ['/pair/start', 'Exact'],
+      ['/pair/approve', 'Exact'], ['/pair/status', 'Exact'],
+    ]);
+    expect(ingress).toContain('nginx.ingress.kubernetes.io/enable-access-log: "false"');
   });
 
   it('keeps the WebSocket authenticated by default', () => {
@@ -59,6 +75,7 @@ describe('deploy/k8s manifests', () => {
     expect(deployment).toMatch(/name:\s*BROWSER_TOKEN_STORE\s*\n\s*value:\s*\/data\//);
     expect(deployment).toMatch(/name:\s*AGENT_BROWSER_OUT_DIR\s*\n\s*value:\s*\/data\//);
     expect(deployment).toMatch(/mountPath:\s*\/data/);
+    expect(deployment).toMatch(/name:\s*BROWSER_EXTENSION_ZIP\s*\n\s*value:\s*\/data\/agent-jake-browser-extension\.zip/);
   });
 });
 

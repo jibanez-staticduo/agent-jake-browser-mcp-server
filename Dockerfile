@@ -28,15 +28,10 @@ COPY --from=builder /app/docker-entrypoint.sh ./docker-entrypoint.sh
 
 RUN npm ci --omit=dev \
  && chmod +x /app/docker-entrypoint.sh \
- # The token store defaults to /app/data/tokens.json. Create it up front and
- # hand it to the unprivileged user, so the image works read-only-root with a
- # single writable volume mounted here.
- && mkdir -p /app/data \
- && chown -R node:node /app/data
+ && mkdir -p /app/data
 
-# Nothing here needs root, and this server drives a browser holding the user's
-# logged-in sessions: run it as the unprivileged user the base image ships.
-USER node
+# Existing Docker installs bind-mount host-owned token stores. Kubernetes sets
+# runAsUser explicitly, while Docker retains the image's original UID behavior.
 
 EXPOSE 8765 8000
 
