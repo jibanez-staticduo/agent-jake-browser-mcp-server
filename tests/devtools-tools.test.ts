@@ -45,12 +45,22 @@ describe('devtools tools', () => {
     expect(text(r)).toBe('[4] POST 201 Fetch https://x.test/api\n[7] GET FAILED(net::ERR_FAILED) XHR https://x.test/down');
   });
 
-  it('renders one request and can write it to a file', async () => {
+  it('redacts credentials and query values from network URLs', async () => {
+    const { context } = fakeContext(() => ({ requests: [
+      { index: 1, method: 'GET', url: 'https://user:password@x.test/api?token=test-secret&session=test-secret#access_token=test-secret', resourceType: 'XHR', status: 200, failure: null },
+    ] }));
+    const result = await tool('browser_network_requests').handle(context, {});
+    expect(text(result)).toContain('https://%5BREDACTED%5D:%5BREDACTED%5D@x.test/api?token=');
+    expect(text(result)).not.toContain('test-secret');
+    expect(text(result)).not.toContain('password');
+  });
+
+  it.skipIf(process.platform !== 'linux')('renders one request and can write it to a file', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'devtools-'));
     const { context } = fakeContext(() => ({
       index: 4, method: 'POST', url: 'https://x.test/api', resourceType: 'Fetch', status: 201, failure: null,
-      requestHeaders: { 'content-type': 'application/json' }, requestBody: '{"a":1}',
-      responseHeaders: {}, responseBody: '{"ok":true}',
+      requestHeaders: { 'content-type': 'application/json', Authorization: 'Bearer test-secret', Cookie: 'session=test-secret' }, requestBody: '{"password":"test-secret"}',
+      responseHeaders: { 'Set-Cookie': 'session=test-secret', 'X-API-Key': 'test-secret' }, responseBody: '{"token":"test-secret"}',
     }));
     const file = join(dir, 'req.txt');
     process.env.AGENT_BROWSER_OUT_DIR = dir;
@@ -58,11 +68,37 @@ describe('devtools tools', () => {
     expect(text(r)).toMatch(/^Saved to /);
     const out = await readFile(file, 'utf8');
     expect(out).toContain('## request-headers\ncontent-type: application/json');
-    expect(out).toContain('## response-headers\n(none)');
-    expect(out).toContain('## response-body\n{"ok":true}');
+    expect(out).toContain('Authorization: [REDACTED]');
+    expect(out).toContain('Cookie: [REDACTED]');
+    expect(out).toContain('Set-Cookie: [REDACTED]');
+    expect(out).toContain('X-API-Key: [REDACTED]');
+    expect(out).not.toContain('test-secret');
+    expect(out).not.toContain('## request-body');
+    expect(out).not.toContain('## response-body');
+    const body = await tool('browser_network_request').handle(context, { index: 4, part: 'response-body' });
+    expect(text(body)).toBe('## response-body\n{"token":"test-secret"}');
   });
 
-  it('keeps filename writes inside the output directory and does not overwrite files', async () => {
+  it('redacts network headers and omits bodies by default', async () => {
+    const { context } = fakeContext(() => ({
+      method: 'GET', url: 'https://x.test/', status: 200, resourceType: 'XHR',
+      requestHeaders: { Authorization: 'Bearer test-secret', Cookie: 'test-secret', 'X-Session-ID': 'test-secret', X_AuthToken: 'test-secret' },
+      responseHeaders: { 'Set-Cookie': 'test-secret', 'X-Access-Key': 'test-secret' },
+      requestBody: 'test-secret', responseBody: 'test-secret',
+    }));
+    const result = await tool('browser_network_request').handle(context, { index: 1 });
+    expect(text(result)).toContain('Authorization: [REDACTED]');
+    expect(text(result)).toContain('Cookie: [REDACTED]');
+    expect(text(result)).toContain('Set-Cookie: [REDACTED]');
+    expect(text(result)).toContain('X-Session-ID: [REDACTED]');
+    expect(text(result)).toContain('X_AuthToken: [REDACTED]');
+    expect(text(result)).toContain('X-Access-Key: [REDACTED]');
+    expect(text(result)).not.toContain('test-secret');
+    expect(text(result)).not.toContain('## request-body');
+    expect(text(result)).not.toContain('## response-body');
+  });
+
+  it.skipIf(process.platform !== 'linux')('keeps filename writes inside the output directory and does not overwrite files', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'out-'));
     process.env.AGENT_BROWSER_OUT_DIR = dir;
     const { context } = fakeContext(() => ({ logs: [{ type: 'log', text: 'ok', timestamp: 0 }] }));
@@ -83,7 +119,7 @@ describe('devtools tools', () => {
     expect(second.isError).toBe(true);
   });
 
-  it('applies the same output boundary to PDFs', async () => {
+  it.skipIf(process.platform !== 'linux')('applies the same output boundary to PDFs', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'pdf-'));
     process.env.AGENT_BROWSER_OUT_DIR = dir;
     const { context } = fakeContext(() => ({ pdf: Buffer.from('%PDF-1.7').toString('base64') }));
@@ -122,7 +158,7 @@ describe('devtools tools', () => {
     expect(JSON.parse(text(body))).toEqual({ t: 'Title' });
   });
 
-  it('sends dropped files as content read by the server', async () => {
+  it.skipIf(process.platform !== 'linux')('sends dropped files as content read by the server', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'drop-'));
     process.env.AGENT_BROWSER_DROP_DIR = dir;
     const file = join(dir, 'a.txt');
@@ -166,6 +202,8 @@ describe('devtools tools', () => {
     expect(tooLarge.isError).toBe(true);
     const tooMany = await tool('browser_drop').handle(context, { ref: '3', paths: Array(9).fill('large.txt') });
     expect(tooMany.isError).toBe(true);
+    const tooMuchData = await tool('browser_drop').handle(context, { ref: '3', data: { 'text/plain': 'x'.repeat(1024 * 1024) } });
+    expect(tooMuchData.isError).toBe(true);
     delete process.env.AGENT_BROWSER_DROP_DIR;
     const dataOnly = await tool('browser_drop').handle(context, { ref: '3', data: { 'text/plain': 'hello' } });
     expect(dataOnly.isError).toBeFalsy();

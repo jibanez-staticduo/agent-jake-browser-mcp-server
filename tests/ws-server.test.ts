@@ -115,6 +115,21 @@ describe('multi-connection registry', () => {
     });
   });
 
+  it('does not log response payloads from the extension', async () => {
+    const port = await serverPort(server!);
+    const extension = await connect(port, { connectionId: 'chrome-a' }, false);
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const pending = server!.send(message('browser_network_request'));
+    await vi.waitFor(() => expect(extension.messages).toHaveLength(1));
+    extension.socket.send(JSON.stringify({
+      id: extension.messages[0]!.id,
+      success: true,
+      result: { responseHeaders: { 'Set-Cookie': 'test-secret' } },
+    }));
+    await pending;
+    expect(stderr.mock.calls.flat().join(' ')).not.toContain('test-secret');
+  });
+
   it('keeps two connectionIds open at the same time and routes per id', async () => {
     const port = await serverPort(server!);
     const a = await connect(port, { connectionId: 'chrome-a', label: 'casa' });

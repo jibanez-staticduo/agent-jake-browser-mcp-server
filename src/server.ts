@@ -66,16 +66,16 @@ export async function createServer(options: ServerOptions): Promise<MCPServer> {
     const connection =
       typeof args.connection === 'string' && args.connection.trim() ? args.connection.trim() : undefined;
     delete args.connection;
-    logger.info(`Calling tool: ${name}`, args, connection ? { connection } : {});
-
     const tool = toolMap.get(name);
     if (!tool) {
-      logger.error(`Unknown tool: ${name}`);
+      logger.error('Unknown tool requested');
       return {
         content: [{ type: 'text', text: `Unknown tool: ${name}` }],
         isError: true,
       };
     }
+
+    logger.info(`Calling tool: ${tool.schema.name}`);
 
     try {
       // Server-side tools answer without a browser
@@ -85,7 +85,7 @@ export async function createServer(options: ServerOptions): Promise<MCPServer> {
 
       if (connection && !context.isConnected(connection)) {
         const open = context.listConnections().map((c) => c.connectionId).join(', ') || 'none';
-        logger.warn(`No browser connection with id ${connection}`);
+        logger.warn('Requested browser connection is not available');
         return {
           content: [
             {
@@ -116,7 +116,7 @@ export async function createServer(options: ServerOptions): Promise<MCPServer> {
       return (await tool.handle(context.forConnection(connection), args)) as any;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      logger.error(`Tool error: ${name}`, message);
+      logger.error(`Tool error: ${name}`);
       return {
         content: [{ type: 'text', text: `Error: ${message}` }],
         isError: true,

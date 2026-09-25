@@ -170,7 +170,6 @@ export function createWSServer(options: WSServerOptions): WSServer {
       try {
         const dataStr = data.toString();
         logger.info('[WS] Raw message received, length:', dataStr.length);
-        logger.info('[WS] Message preview:', dataStr.substring(0, 200));
 
         const rawMessage = JSON.parse(dataStr);
         if ((rawMessage as { type?: string })?.type === 'heartbeat') {
@@ -194,8 +193,8 @@ export function createWSServer(options: WSServerOptions): WSServer {
         }
 
         onMessage?.(message);
-      } catch (err) {
-        logger.error('Failed to parse message', err);
+      } catch {
+        logger.error('Failed to parse WebSocket message');
       }
     });
 
