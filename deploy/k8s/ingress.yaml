@@ -1,0 +1,77 @@
+# Example only — adjust the class, host and TLS to your cluster, or delete this
+# file and reach the server some other way (an ssh tunnel, a VPN, a mesh).
+#
+# Only named browser-facing routes reach port 8000. No root path is included:
+# ingress-nginx can turn Exact / into regex ^/ when another Ingress on the same
+# host uses use-regex or rewrite-target, exposing unauthenticated /mcp.
+#
+# Do NOT publish this to the open internet on the strength of pairing alone.
+# /pair/approve mints a working browser token for anyone who presents a valid
+# code. Keep it on a private network or behind an authenticating proxy.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agent-jake-browser
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # /ws?token= and /pair/status?otp= carry credentials in the URL.
+    nginx.ingress.kubernetes.io/enable-access-log: "false"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["browser-mcp.example.com"]
+      secretName: agent-jake-browser-tls
+  rules:
+    - host: browser-mcp.example.com
+      http:
+        paths:
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: agent-jake-browser
+                port:
+                  name: browser-ws
+          - path: /download
+            pathType: Exact
+            backend:
+              service:
+                name: agent-jake-browser
+                port:
+                  name: mcp-http
+          - path: /connections
+            pathType: Exact
+            backend:
+              service:
+                name: agent-jake-browser
+                port:
+                  name: mcp-http
+          - path: /pair
+            pathType: Exact
+            backend:
+              service:
+                name: agent-jake-browser
+                port:
+                  name: mcp-http
+          - path: /pair/start
+            pathType: Exact
+            backend:
+              service:
+                name: agent-jake-browser
+                port:
+                  name: mcp-http
+          - path: /pair/approve
+            pathType: Exact
+            backend:
+              service:
+                name: agent-jake-browser
+                port:
+                  name: mcp-http
+          - path: /pair/status
+            pathType: Exact
+            backend:
+              service:
+                name: agent-jake-browser
+                port:
+                  name: mcp-http

@@ -1,0 +1,125 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-jake-browser
+  labels:
+    app.kubernetes.io/name: agent-jake-browser
+spec:
+  # ONE replica, and this is not a capacity choice. Every piece of state this
+  # server keeps lives in the process: the open extension sockets, the
+  # connection registry, and the pending pairing codes. With two replicas the
+  # extension's WebSocket lands on pod A while the agent's tool call lands on
+  # pod B, and the call fails with "Extension not connected" — intermittently,
+  # which is the worst way for it to fail. Scale by running more browsers on the
+  # one server, not more servers.
+  replicas: 1
+  strategy:
+    # A second pod cannot take over the sockets anyway, so do not let one exist.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agent-jake-browser
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agent-jake-browser
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: server
+          image: ghcr.io/OWNER/agent-jake-browser-mcp-server:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: mcp-http
+              containerPort: 8000
+            - name: browser-ws
+              containerPort: 8765
+          env:
+            # Outside a container the server binds both listeners to loopback,
+            # and that is the whole of its protection for the MCP plane — /mcp
+            # has no auth of its own. A pod's loopback is reachable by nothing,
+            # so in Kubernetes it must bind 0.0.0.0 and the boundary moves to
+            # the NetworkPolicy in networkpolicy.yaml. Deploy them together;
+            # 0.0.0.0 without the policy hands every pod in the cluster full
+            # control of a browser that is logged into the user's accounts.
+            - name: MCP_HTTP_HOST
+              value: "0.0.0.0"
+            - name: BROWSER_WS_HOST
+              value: "0.0.0.0"
+            - name: MCP_HTTP_PORT
+              value: "8000"
+            - name: BROWSER_WS_PORT
+              value: "8765"
+            # Tokens, the extension ZIP and tool output live on the writable PVC.
+            - name: BROWSER_TOKEN_STORE
+              value: /data/tokens.json
+            - name: BROWSER_EXTENSION_ZIP
+              value: /data/agent-jake-browser-extension.zip
+            - name: AGENT_BROWSER_OUT_DIR
+              value: /data/out
+            # Accept tokens minted by the pairing page. Turn this off and set
+            # BROWSER_WS_TOKEN instead if you would rather hand every browser
+            # the same static token out of band.
+            - name: BROWSER_ALLOW_PAIRING
+              value: "true"
+            # What the extension is told to dial. Behind the Ingress the public
+            # host is not the pod's, so it has to be stated here.
+            - name: BROWSER_WS_PATH
+              value: /ws
+            - name: BROWSER_PUBLIC_WS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-jake-browser-config
+                  key: publicWsUrl
+            - name: BROWSER_PUBLIC_ORIGIN
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-jake-browser-config
+                  key: publicOrigin
+            # Optional shared token. Leave the Secret absent to rely on pairing.
+            - name: BROWSER_WS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agent-jake-browser-token
+                  key: token
+                  optional: true
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: mcp-http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: mcp-http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 25m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: agent-jake-browser-data
+        - name: tmp
+          emptyDir: {}

@@ -131,11 +131,17 @@ function listToolsResult() {
 }
 
 /**
- * The browser talks to this server from another origin (the extension popup, the
- * pairing page), so the pairing and download routes answer CORS preflights.
+ * The extension polls pairing from a chrome-extension origin. The approval page
+ * is same-origin and must not expose its token response to arbitrary websites.
  */
 function cors(req, res, next) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  const origin = req.headers.origin || '';
+  if (!/^chrome-extension:\/\/[a-p]{32}$/.test(origin)) {
+    if (req.method === 'OPTIONS') return res.sendStatus(403);
+    return next();
+  }
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'content-type');
   res.setHeader('Access-Control-Max-Age', '600');
@@ -148,7 +154,7 @@ function cors(req, res, next) {
 }
 
 app.use((req, res, next) => {
-  if (req.path === '/download' || req.path === '/connections' || req.path === '/pair' || req.path.startsWith('/pair/')) {
+  if (req.path === '/pair/start' || req.path === '/pair/status') {
     return cors(req, res, next);
   }
   return next();
