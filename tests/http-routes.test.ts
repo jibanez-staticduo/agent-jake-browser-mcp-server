@@ -518,3 +518,27 @@ describe('patchZipConfig helpers', () => {
     expect(extensionConfigJson('wss://x/ws')).not.toMatch(/token/i);
   });
 });
+
+describe('POST /extension/reload', () => {
+  it('needs a connection and an open browser', async () => {
+    expect((await request(primary, 'POST', '/extension/reload', { body: {} })).status).toBe(400);
+    expect((await request(primary, 'POST', '/extension/reload', { body: { connection: 'ghost' } })).status).toBe(404);
+  });
+
+  it('sends the reload and answers once the browser is back', async () => {
+    const first = await connectExtension(primary, pairedToken, 'chrome-reload', 'recargable');
+    // Behave like chrome.runtime.reload(): answer, drop the socket, come back with the same id.
+    first.socket.on('message', (data) => {
+      const message = JSON.parse(data.toString()) as { type?: string };
+      if (message.type !== 'browser_reload_extension') return;
+      setTimeout(() => {
+        first.socket.close();
+        setTimeout(() => { void connectExtension(primary, pairedToken, 'chrome-reload', 'recargable'); }, 200);
+      }, 100);
+    });
+    const res = await request(primary, 'POST', '/extension/reload', { body: { connection: 'recargable', timeoutMs: 5000 } });
+    expect(res.status).toBe(200);
+    expect(res.json).toMatchObject({ ok: true, connectionId: 'chrome-reload', name: 'recargable' });
+    expect(first.messages.some((m) => m.type === 'browser_reload_extension')).toBe(true);
+  });
+});
