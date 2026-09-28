@@ -2,9 +2,11 @@
  * Utility tools: wait, screenshot, getConsoleLogs, evaluate, resizeViewport.
  */
 import { z } from 'zod';
-import { mkdir, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { constants } from 'node:fs';
+import { mkdir, open } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { openPinnedDirectory, pinnedChildPath } from './pinned-directory.js';
 import { createTool, textResult, imageResult, errorResult } from './types.js';
 import type { Tool } from '../types.js';
 
@@ -41,7 +43,10 @@ export const waitTool: Tool = createTool({
  */
 export const screenshotTool: Tool = createTool({
   name: 'browser_screenshot',
-  description: 'Take a screenshot of the current page or a specific element.',
+  description:
+    'Take a screenshot of the current page or a specific element. If the tab is ' +
+    'in the background it is briefly brought to the front to capture and then ' +
+    'hidden again, so the user keeps their own view.',
   schema: z.object({
     ref: z.string().optional().describe('Element reference to screenshot'),
     selector: z.string().optional().describe('CSS selector for element to screenshot'),
@@ -138,12 +143,67 @@ export const getConsoleLogsTool: Tool = createTool({
  * Text result, or written to a file when the caller asked for one: long network or
  * console dumps then cost no tokens.
  */
+async function saveOutput(content: string | Buffer, filename: string): Promise<string> {
+  await mkdir(outDir(), { recursive: true });
+  const { root, handle: rootHandle } = await openPinnedDirectory(outDir());
+  try {
+    const name = basename(filename);
+    if (!name || name === '.' || name === '..' || name.includes('\\') ||
+        (!isAbsolute(filename) && filename !== name) ||
+        (isAbsolute(filename) && dirname(filename) !== root)) {
+      throw new Error('Output filename must be directly inside AGENT_BROWSER_OUT_DIR');
+    }
+    const target = pinnedChildPath(rootHandle, name);
+    const handle = await open(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    try {
+      await handle.writeFile(content);
+    } finally {
+      await handle.close();
+    }
+    return join(root, name);
+  } finally {
+    await rootHandle.close();
+  }
+}
+
 async function outputResult(text: string, filename?: string) {
   if (!filename) return textResult(text);
-  const target = isAbsolute(filename) ? filename : resolve(outDir(), filename);
-  await mkdir(dirname(target), { recursive: true });
-  await writeFile(target, text);
-  return textResult(`Saved to ${target} (${text.length} chars)`);
+  try {
+    const target = await saveOutput(text, filename);
+    return textResult(`Saved to ${target} (${text.length} chars)`);
+  } catch (error) {
+    return errorResult(`Cannot save output: ${(error as Error).message}`);
+  }
+}
+
+function safeNetworkHeaderValue(name: string, value: string): string {
+  if (typeof value !== 'string') return '[REDACTED]';
+  const trimmed = value.trim();
+  switch (name.toLowerCase()) {
+    case 'content-type': {
+      const mime = /^([a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+)(?:\s*;.*)?$/i.exec(trimmed);
+      return mime?.[1] && trimmed.length <= 256 ? mime[1].toLowerCase() : '[REDACTED]';
+    }
+    case 'content-length':
+      return /^\d{1,20}$/.test(trimmed) ? trimmed : '[REDACTED]';
+    case 'cache-control': {
+      if (trimmed.length > 256) return '[REDACTED]';
+      const directives = trimmed.split(',').map(part => part.trim().toLowerCase());
+      const safe = /^(?:no-cache|no-store|public|private|must-revalidate|proxy-revalidate|immutable|(?:s-maxage|max-age|stale-while-revalidate|stale-if-error)=\d{1,12})$/;
+      return directives.every(part => safe.test(part)) ? directives.join(', ') : '[REDACTED]';
+    }
+    default:
+      return '[REDACTED]';
+  }
+}
+
+function redactNetworkUrl(raw: string): string {
+  try {
+    const url = new URL(raw);
+    return ['http:', 'https:', 'ws:', 'wss:'].includes(url.protocol) ? url.origin : '[opaque URL]';
+  } catch {
+    return '[unparseable URL]';
+  }
 }
 
 /**
@@ -174,7 +234,7 @@ export const networkRequestsTool: Tool = createTool({
       return textResult('No network requests captured');
     }
     const lines = requests.map(r =>
-      `[${r.index}] ${r.method} ${r.failure ? `FAILED(${r.failure})` : r.status ?? 'pending'} ${r.resourceType} ${r.url}`);
+      `[${r.index}] ${r.method} ${r.failure ? `FAILED(${r.failure})` : r.status ?? 'pending'} ${r.resourceType} ${redactNetworkUrl(r.url)}`);
     return outputResult(lines.join('\n'), params.filename);
   },
 });
@@ -184,7 +244,7 @@ export const networkRequestsTool: Tool = createTool({
  */
 export const networkRequestTool: Tool = createTool({
   name: 'browser_network_request',
-  description: 'Headers and bodies of one request [n] from browser_network_requests, or only one part of it. Response bodies come from Chrome and may be gone after a navigation.',
+  description: 'Headers of one request [n] from browser_network_requests. Only common diagnostic header values are visible; other values are redacted. Request and response bodies are returned only when explicitly selected with part; they may contain secrets. Response bodies may be gone after navigation.',
   schema: z.object({
     index: z.number().int().describe('The [n] from browser_network_requests'),
     part: z.enum(['request-headers', 'request-body', 'response-headers', 'response-body'])
@@ -204,16 +264,22 @@ export const networkRequestTool: Tool = createTool({
     }
     const r = response.result as Record<string, unknown>;
     const headers = (h: unknown) => h && typeof h === 'object'
-      ? Object.entries(h as Record<string, string>).map(([k, v]) => `${k}: ${v}`).join('\n') || '(none)'
+      ? Object.entries(h as Record<string, string>).map(([k, v]) =>
+        `${k}: ${safeNetworkHeaderValue(k, v)}`,
+      ).join('\n') || '(none)'
       : '(none)';
     const sections: string[] = [];
     if (!params.part) {
-      sections.push(`## general\n${r.method} ${r.url}\nstatus: ${r.failure ? `FAILED ${r.failure}` : r.status ?? 'pending'}\ntype: ${r.resourceType}`);
+      sections.push(`## general\n${r.method} ${redactNetworkUrl(String(r.url))}\nstatus: ${r.failure ? `FAILED ${r.failure}` : r.status ?? 'pending'}\ntype: ${r.resourceType}`);
     }
-    if ('requestHeaders' in r) sections.push(`## request-headers\n${headers(r.requestHeaders)}`);
-    if ('requestBody' in r) sections.push(`## request-body\n${r.requestBody ?? '(empty)'}`);
-    if ('responseHeaders' in r) sections.push(`## response-headers\n${headers(r.responseHeaders)}`);
-    if ('responseBody' in r) sections.push(`## response-body\n${r.responseBody ?? '(no response)'}`);
+    if ((!params.part || params.part === 'request-headers') && 'requestHeaders' in r) {
+      sections.push(`## request-headers\n${headers(r.requestHeaders)}`);
+    }
+    if (params.part === 'request-body' && 'requestBody' in r) sections.push(`## request-body\n${r.requestBody ?? '(empty)'}`);
+    if ((!params.part || params.part === 'response-headers') && 'responseHeaders' in r) {
+      sections.push(`## response-headers\n${headers(r.responseHeaders)}`);
+    }
+    if (params.part === 'response-body' && 'responseBody' in r) sections.push(`## response-body\n${r.responseBody ?? '(no response)'}`);
     return outputResult(sections.join('\n\n'), params.filename);
   },
 });
@@ -418,15 +484,13 @@ export const pdfTool: Tool = createTool({
       return errorResult('The extension returned no PDF');
     }
 
-    const target = params.path
-      ? (isAbsolute(params.path) ? params.path : resolve(outDir(), params.path))
-      : resolve(outDir(), `agent-browser-${Date.now()}.pdf`);
-
     const bytes = Buffer.from(base64, 'base64');
-    await mkdir(dirname(target), { recursive: true });
-    await writeFile(target, bytes);
-
-    return textResult(`PDF saved to ${target} (${bytes.length} bytes)`);
+    try {
+      const target = await saveOutput(bytes, params.path ?? `agent-browser-${Date.now()}.pdf`);
+      return textResult(`PDF saved to ${target} (${bytes.length} bytes)`);
+    } catch (error) {
+      return errorResult(`Cannot save PDF: ${(error as Error).message}`);
+    }
   },
 });
 

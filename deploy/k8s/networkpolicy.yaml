@@ -1,0 +1,77 @@
+# The MCP plane has no authentication of its own. On a laptop it is protected by
+# binding to loopback; in a pod that protection is gone the moment it binds
+# 0.0.0.0, which it must. These policies put the boundary back.
+#
+# Read them as the deployment's security contract, not as optional hardening:
+# without them any pod in the cluster can drive a browser that holds the user's
+# logged-in sessions. They need a CNI that enforces NetworkPolicy (Calico,
+# Cilium, Antrea…). On a cluster whose CNI ignores them — plain flannel, some
+# managed defaults — this deployment is not safe; put an authenticating proxy in
+# front instead.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-jake-browser-default-deny
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-jake-browser
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-jake-browser-allow-mcp-clients
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-jake-browser
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # Label the Pod template of each trusted client workload, so its
+        # replacement pods keep agent-jake-browser/client=true.
+        # An empty `from` here would mean "the whole cluster", which is what
+        # this file exists to prevent.
+        # Label only namespaces whose administrators may create MCP clients.
+        # Users who can create pods and choose labels there gain browser access.
+        - namespaceSelector:
+            matchLabels:
+              agent-jake-browser/mcp-client-namespace: "true"
+          podSelector:
+            matchLabels:
+              agent-jake-browser/client: "true"
+      ports:
+        - port: 8000
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-jake-browser-allow-public-routes-from-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-jake-browser
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # The browser is outside the cluster, so its WebSocket arrives through
+        # the ingress controller. Point this at the namespace yours runs in —
+        # the label below is the one Kubernetes sets automatically.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+      ports:
+        # The Ingress only routes exact public paths to 8000; NetworkPolicy
+        # cannot distinguish /pair from the unauthenticated /mcp on that port.
+        - port: 8000
+          protocol: TCP
+        - port: 8765
+          protocol: TCP

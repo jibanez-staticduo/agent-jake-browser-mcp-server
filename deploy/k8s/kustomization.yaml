@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: agent-jake-browser
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - networkpolicy.yaml
+  # Example; delete this line if you reach the server another way.
+  - ingress.yaml
+
+images:
+  - name: ghcr.io/OWNER/agent-jake-browser-mcp-server
+    newTag: latest
