@@ -2,10 +2,12 @@
  * Interaction tools: click, type, hover, drag, selectOption, pressKey, uploadFile.
  */
 import { z } from 'zod';
-import { readFile } from 'node:fs/promises';
-import { basename, extname } from 'node:path';
+import { constants } from 'node:fs';
+import { lstat, open, type FileHandle } from 'node:fs/promises';
+import { basename, dirname, extname, isAbsolute } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { openPinnedDirectory, pinnedChildPath } from './pinned-directory.js';
 import { createTool, textResult, errorResult } from './types.js';
 import type { Tool } from '../types.js';
 
@@ -247,27 +249,80 @@ const MIME: Record<string, string> = {
   xml: 'application/xml', zip: 'application/zip', mp4: 'video/mp4', mp3: 'audio/mpeg',
 };
 
+const MAX_DROP_FILES = 8;
+const MAX_DROP_BYTES = 10 * 1024 * 1024;
+const MAX_DROP_DATA_BYTES = 1024 * 1024;
+
+async function readDropFile(input: string, root: string, rootHandle: FileHandle, remaining: number) {
+  const name = basename(input);
+  if (name === '.' || name === '..' || name === '' || (!isAbsolute(input) && input !== name) ||
+      (isAbsolute(input) && dirname(input) !== root) || name.includes('\\')) {
+    throw new Error('Drop files must be direct children of AGENT_BROWSER_DROP_DIR');
+  }
+  const target = pinnedChildPath(rootHandle, name);
+  const pathStat = await lstat(target);
+  if (!pathStat.isFile()) throw new Error('Drop path is not a regular file');
+  const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.dev !== pathStat.dev || stat.ino !== pathStat.ino) {
+      throw new Error('Drop path changed before it could be read');
+    }
+    if (stat.size > remaining) throw new Error('Drop files exceed the 10 MiB total limit');
+    const chunks: Buffer[] = [];
+    let size = 0;
+    while (true) {
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, remaining - size + 1));
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+      if (bytesRead === 0) break;
+      size += bytesRead;
+      if (size > remaining) throw new Error('Drop files exceed the 10 MiB total limit');
+      chunks.push(chunk.subarray(0, bytesRead));
+    }
+    return {
+      file: { name, mimeType: MIME[extname(name).slice(1).toLowerCase()] ?? 'application/octet-stream', base64: Buffer.concat(chunks, size).toString('base64') },
+      size,
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
 /**
  * Drop files or data on an element, as if dragged in from outside the page.
  */
 export const dropTool: Tool = createTool({
   name: 'browser_drop',
-  description: 'Drop files and/or MIME-typed data onto an element as if dragged in from outside the page (dragenter/dragover/drop with a DataTransfer). For drop zones that have no file input. Files are read by the MCP server and sent as content. Reports whether the target accepted the drag.',
+  description: 'Drop files and/or MIME-typed data onto an element. Files must be direct children of the operator-configured AGENT_BROWSER_DROP_DIR; at most 8 files and 10 MiB total. MIME data is limited to 1 MiB. Data-only drops need no directory. Reports whether the target accepted the drag.',
   schema: z.object({
     ref: z.string().optional().describe('Element reference from snapshot'),
     selector: z.string().optional().describe('CSS selector of the drop target'),
-    paths: z.array(z.string()).optional().describe('Absolute paths of files to drop'),
+    paths: z.array(z.string()).max(MAX_DROP_FILES).optional().describe('File names or absolute paths directly inside AGENT_BROWSER_DROP_DIR'),
     data: z.record(z.string(), z.string()).optional().describe('MIME type → value, e.g. {"text/plain": "hello"}'),
   }).refine(d => d.ref || d.selector, { message: 'Either ref or selector must be provided' })
     .refine(d => d.paths?.length || (d.data && Object.keys(d.data).length), { message: 'paths or data must be provided' }),
   async handle(context, params) {
-    let files: Array<{ name: string; mimeType: string; base64: string }>;
+    let files: Array<{ name: string; mimeType: string; base64: string }> = [];
     try {
-      files = await Promise.all((params.paths ?? []).map(async p => ({
-        name: basename(p),
-        mimeType: MIME[extname(p).slice(1).toLowerCase()] ?? 'application/octet-stream',
-        base64: (await readFile(p)).toString('base64'),
-      })));
+      const dataBytes = Object.entries(params.data ?? {}).reduce(
+        (total, [type, value]) => total + Buffer.byteLength(type) + Buffer.byteLength(value), 0);
+      if (dataBytes > MAX_DROP_DATA_BYTES) throw new Error('Drop MIME data exceeds the 1 MiB limit');
+      if ((params.paths?.length ?? 0) > MAX_DROP_FILES) throw new Error('Drop accepts at most 8 files');
+      if (params.paths?.length) {
+        const configuredRoot = process.env.AGENT_BROWSER_DROP_DIR;
+        if (!configuredRoot) throw new Error('AGENT_BROWSER_DROP_DIR must be configured for file drops');
+        const { root, handle } = await openPinnedDirectory(configuredRoot);
+        try {
+          let remaining = MAX_DROP_BYTES;
+          for (const path of params.paths) {
+            const { file, size } = await readDropFile(path, root, handle, remaining);
+            files.push(file);
+            remaining -= size;
+          }
+        } finally {
+          await handle.close();
+        }
+      }
     } catch (error) {
       return errorResult(`Cannot read file: ${(error as Error).message}`);
     }

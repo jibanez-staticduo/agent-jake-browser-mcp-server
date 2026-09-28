@@ -65,6 +65,27 @@ Add to your MCP settings:
 }
 ```
 
+### On Kubernetes
+
+The server also runs as a pod, with the browser staying on your own machine —
+useful when the agents that drive it already live in the cluster. Manifests and
+the security contract that comes with them are in
+[`deploy/k8s/`](deploy/k8s/README.md):
+
+```bash
+docker build -t <registry>/agent-jake-browser-mcp-server:<tag> .
+# edit deploy/k8s/kustomization.yaml, configmap.yaml, ingress.yaml
+kubectl apply -k deploy/k8s
+```
+
+Agents then reach it over streamable HTTP at
+`http://agent-jake-browser.agent-jake-browser.svc:8000/mcp`, and browsers pair
+from wherever they are.
+
+One thing not to skip: in a pod the MCP endpoint cannot bind loopback, which is
+the only thing protecting it on a laptop. `deploy/k8s/networkpolicy.yaml`
+replaces that boundary and is part of the deployment, not an optional extra.
+
 ### CLI Options
 
 ```bash
@@ -105,6 +126,27 @@ also works while nothing is connected.
 | `BROWSER_PUBLIC_WS_URL` | derived | Full `ws(s)://host/path` handed to the extension. Use it when the proxy mapping is not derivable from the request. |
 | `BROWSER_WS_PATH` | `/` | Path advertised to the extension, for proxies that map the socket to a subpath. |
 | `MCP_HTTP_HOST` / `MCP_HTTP_PORT` | `127.0.0.1` / `8000` | MCP streamable HTTP endpoint. |
+| `BROWSER_PUBLIC_ORIGIN` | derived | Origin used to build the approval link returned by `/pair/start`. Set it when the proxy host is not derivable from the request. |
+| `AGENT_BROWSER_OUT_DIR` | system temp dir | Where `browser_pdf` and tool results saved with `filename` write their files. |
+| `AGENT_BROWSER_DROP_DIR` | unset (file drops disabled) | Directory of files available to `browser_drop`. Files must be direct children, with no symlinks; maximum 8 files and 10 MiB total per call. Mount only files intended for browser upload. MIME data-only drops remain available with a 1 MiB limit. |
+| `AGENT_BROWSER_ALLOW_UNSAFE_CODE` | unset (disabled) | Set exactly `1` to enable `browser_run_code_unsafe`, which executes arbitrary JavaScript in the MCP server process. Only use it with fully trusted MCP clients. |
+| `AGENT_BROWSER_CONNECTION_LABELS` | unset | JSON map of `connectionId` to a friendly name (e.g. `{"259bc…":"mac"}`), so an MCP session can pick a paired browser by `id` or `name` instead of the global most-recently-used. |
+| `AGENT_BROWSER_DEFAULT_CONNECTION` | unset (most recently used) | Connection `id` or `name` used when a session has not chosen one. |
+| `AGENT_BROWSER_OP_BIN` | `op` | Reader binary for `browser_fill_secret`, invoked as `<bin> read <op://ref>` on the server machine to pull a 1Password secret without it crossing the transcript. |
+
+PDFs and network or console results written with a path must be direct children of
+`AGENT_BROWSER_OUT_DIR` (or the system temp directory by default). Existing files
+are never overwritten; choose a new name for each result. Secure file drops and
+server-side output files currently require Linux (`/proc/self/fd`); they fail
+closed on other platforms. Data-only drops and inline tool results still work.
+
+`browser_network_request` returns metadata and headers by default. Only values
+of `content-type` (MIME type only), `content-length` (digits only), and
+`cache-control` (known directives only) remain visible; other header values
+are redacted. Network URLs show only the origin, never the path, query,
+userinfo or fragment. Request or response bodies require an explicit `part`
+because they can contain credentials or private form data. Custom header names
+can also carry private data, so use these tools only with trusted MCP clients.
 
 ### HTTP surface
 
