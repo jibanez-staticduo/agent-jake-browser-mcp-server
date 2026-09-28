@@ -10,13 +10,16 @@ import type { Tool } from '../types.js';
  */
 export const newTabTool: Tool = createTool({
   name: 'browser_new_tab',
-  description: 'Open a URL in a new browser tab and connect to it.',
+  description:
+    'Open a URL in a new browser tab and connect to it. The tab opens in the ' +
+    'BACKGROUND so it does not steal the user\'s view; use switchTo: true only ' +
+    'when the user is meant to see it.',
   schema: z.object({
     url: z.string().url().describe('URL to open in the new tab'),
     switchTo: z.boolean()
       .optional()
-      .default(true)
-      .describe('Switch to the new tab after opening'),
+      .default(false)
+      .describe('Bring the new tab to the front after opening it (default: false, stays in background)'),
   }),
   async handle(context, params) {
     const response = await context.send('browser_new_tab', {
@@ -101,6 +104,35 @@ export const switchTabTool: Tool = createTool({
 });
 
 /**
+ * Send a tab to the background.
+ */
+export const sendToBackTool: Tool = createTool({
+  name: 'browser_send_to_back',
+  description:
+    'Hide the connected (or given) tab by activating another tab of its window, ' +
+    'giving the user their view back. Use browser_switch_tab to bring a tab to ' +
+    'the front when the user is meant to see it.',
+  schema: z.object({
+    tabId: z.number()
+      .optional()
+      .describe('ID of the tab to hide. Omit to hide the connected tab.'),
+  }),
+  async handle(context, params) {
+    const response = await context.send('browser_send_to_back', {
+      tabId: params.tabId,
+    });
+
+    if (!response.success) {
+      return errorResult(response.error?.message ?? 'Send to back failed');
+    }
+
+    return textResult(
+      `Tab ${params.tabId ?? 'connected'} sent to background`
+    );
+  },
+});
+
+/**
  * Close a tab.
  */
 export const closeTabTool: Tool = createTool({
@@ -126,5 +158,6 @@ export const tabTools: Tool[] = [
   newTabTool,
   listTabsTool,
   switchTabTool,
+  sendToBackTool,
   closeTabTool,
 ];
