@@ -60,6 +60,7 @@ describe('Tool Registry', () => {
     expect(names).toContain('browser_new_tab');
     expect(names).toContain('browser_list_tabs');
     expect(names).toContain('browser_switch_tab');
+    expect(names).toContain('browser_send_to_back');
     expect(names).toContain('browser_close_tab');
 
     // Queries
@@ -180,5 +181,61 @@ describe('Tool Result Formatting', () => {
 
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('Element not found');
+  });
+});
+
+describe('Background tab behavior', () => {
+  const mockContext = () => ({
+    send: vi.fn().mockResolvedValue({ success: true, result: { tabId: 42 } }),
+    isConnected: () => true,
+  });
+
+  it('browser_new_tab defaults switchTo to false (background)', async () => {
+    const tools = getAllTools();
+    const newTabTool = tools.find(t => t.schema.name === 'browser_new_tab')!;
+    const ctx = mockContext();
+
+    await newTabTool.handle(ctx, { url: 'https://example.com' });
+
+    expect(ctx.send).toHaveBeenCalledWith('browser_new_tab', {
+      url: 'https://example.com',
+      switchTo: false,
+    });
+  });
+
+  it('browser_new_tab forwards switchTo: true when requested', async () => {
+    const tools = getAllTools();
+    const newTabTool = tools.find(t => t.schema.name === 'browser_new_tab')!;
+    const ctx = mockContext();
+
+    await newTabTool.handle(ctx, { url: 'https://example.com', switchTo: true });
+
+    expect(ctx.send).toHaveBeenCalledWith('browser_new_tab', {
+      url: 'https://example.com',
+      switchTo: true,
+    });
+  });
+
+  it('browser_send_to_back forwards tabId and returns text', async () => {
+    const tools = getAllTools();
+    const sendToBackTool = tools.find(t => t.schema.name === 'browser_send_to_back')!;
+    const ctx = mockContext();
+
+    const result = await sendToBackTool.handle(ctx, { tabId: 7 });
+
+    expect(ctx.send).toHaveBeenCalledWith('browser_send_to_back', { tabId: 7 });
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toContain('7');
+  });
+
+  it('browser_send_to_back with no tabId hides the connected tab', async () => {
+    const tools = getAllTools();
+    const sendToBackTool = tools.find(t => t.schema.name === 'browser_send_to_back')!;
+    const ctx = mockContext();
+
+    const result = await sendToBackTool.handle(ctx, {});
+
+    expect(ctx.send).toHaveBeenCalledWith('browser_send_to_back', { tabId: undefined });
+    expect(result.content[0].text).toContain('connected');
   });
 });
