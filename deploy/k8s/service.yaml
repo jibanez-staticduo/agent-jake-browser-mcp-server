@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-jake-browser
+  labels:
+    app.kubernetes.io/name: agent-jake-browser
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: agent-jake-browser
+  ports:
+    # The MCP endpoint agents talk to (streamable HTTP, /mcp) plus the pairing
+    # and download pages that share the same listener.
+    - name: mcp-http
+      port: 8000
+      targetPort: mcp-http
+      protocol: TCP
+    # The WebSocket the Chrome extension dials in on. It is a separate listener
+    # on a separate port, so a reverse proxy has to route it explicitly.
+    - name: browser-ws
+      port: 8765
+      targetPort: browser-ws
+      protocol: TCP
