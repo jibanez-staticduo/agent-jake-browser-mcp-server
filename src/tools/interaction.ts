@@ -383,11 +383,11 @@ export async function readSecret(ref: string): Promise<string> {
 
 export const fillSecretTool: Tool = createTool({
   name: 'browser_fill_secret',
-  description: 'Type a secret from 1Password (op://vault/item/field) into a field. The value is read on the browser machine and never appears in arguments, results or logs. Use it for passwords, never browser_type.',
+  description: 'Type a secret from 1Password (op://vault/item/field) into a field. The value is read on the browser machine and never appears in arguments, results or logs. Use it for passwords AND for 2FA/TOTP codes (Google 2-Step Verification included), never browser_type. TOTP: point at the one-time password field with ?attribute=otp (op://vault/item/one-time password?attribute=otp) and it types the current 6-digit code; without ?attribute=otp it would type the otpauth:// seed.',
   schema: z.object({
     ref: z.string().optional().describe('Element reference from browser_state/snapshot'),
     selector: z.string().optional().describe('CSS selector to find the element'),
-    secretRef: z.string().regex(/^op:\/\//, 'secretRef must be an op:// reference').describe('1Password secret reference, op://vault/item/field'),
+    secretRef: z.string().regex(/^op:\/\//, 'secretRef must be an op:// reference').describe('1Password secret reference, op://vault/item/field. TOTP code: op://vault/item/one-time password?attribute=otp'),
     clear: z.boolean().optional().default(true).describe('Clear existing text before typing'),
   }).refine(
     data => data.ref || data.selector,
