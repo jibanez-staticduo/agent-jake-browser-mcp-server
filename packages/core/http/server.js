@@ -6,11 +6,11 @@ import path from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
-import { createContext } from './src/context.ts';
-import { getAllTools } from './src/tools/index.ts';
-import { getSharedTokenStore } from './src/token-store.ts';
-import { createPairingStore } from './src/pairing-store.ts';
-import { patchZipConfig } from './src/extension-zip.ts';
+import { createContext } from '../src/context.ts';
+import { getAllTools } from '../src/tools/index.ts';
+import { getSharedTokenStore } from '../src/token-store.ts';
+import { createPairingStore } from '../src/pairing-store.ts';
+import { patchZipConfig } from '../src/extension-zip.ts';
 
 const PORT = Number(process.env.MCP_HTTP_PORT || 8000);
 const WS_PORT = Number(process.env.BROWSER_WS_PORT || 8765);
