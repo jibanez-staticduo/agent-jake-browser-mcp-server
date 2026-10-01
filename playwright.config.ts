@@ -6,10 +6,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const extensionPath = path.join(__dirname, '..', 'agent-jake-browser-mcp-extension', 'dist');
+const extensionPath = path.resolve(process.env.BROWSER_EXTENSION_PATH || './test-artifacts/extension');
 
 export default defineConfig({
-  testDir: './tests',
+  testDir: './tests/integration',
   testMatch: 'e2e.test.ts',
   timeout: 60000,
   retries: 0,

@@ -65,26 +65,18 @@ Add to your MCP settings:
 }
 ```
 
-### On Kubernetes
+### Infrastructure
 
-The server also runs as a pod, with the browser staying on your own machine —
-useful when the agents that drive it already live in the cluster. Manifests and
-the security contract that comes with them are in
-[`deploy/k8s/`](deploy/k8s/README.md):
+Docker recipes, healthchecks and Kubernetes manifests belong to the house
+infrastructure repository. StaticDuo's extraction destination is
+`nas-docker/mcp/agent-jake-browser/`; its `migration-source.json` records hashes
+of the infrastructure copied from server SHA `846dab66`.
 
-```bash
-docker build -t <registry>/agent-jake-browser-mcp-server:<tag> .
-# edit deploy/k8s/kustomization.yaml, configmap.yaml, ingress.yaml
-kubectl apply -k deploy/k8s
-```
-
-Agents then reach it over streamable HTTP at
-`http://agent-jake-browser.agent-jake-browser.svc:8000/mcp`, and browsers pair
-from wherever they are.
-
-One thing not to skip: in a pod the MCP endpoint cannot bind loopback, which is
-the only thing protecting it on a laptop. `deploy/k8s/networkpolicy.yaml`
-replaces that boundary and is part of the deployment, not an optional extra.
+Build this product with `npm ci && npm run build`. Infrastructure consumes the
+root artifacts `dist/index.js` (stdio) and `dist/http-server.js` (HTTP).
+The compatibility command `node http-server.js` also runs compiled HTTP.
+The HTTP listener defaults to loopback; a deployment that changes the bind host
+must provide its own authenticated proxy and network boundary.
 
 ### CLI Options
 
@@ -273,25 +265,40 @@ npm run typecheck
 
 ## Project Structure
 
+```text
+packages/
+  core/
+    src/
+      product.ts       # Importable API; no listener starts on import
+      cli/             # Compiled stdio and HTTP process entrypoints
+      http/            # HTTP routes and existing pairing/download pages
+      server.ts        # MCP server
+      context.ts       # Browser communication
+      ws-server.ts     # WebSocket authentication and routing
+      tools/           # Shared tools and pinned-directory safeguards
+      utils/           # Shared utilities
+    tests/             # Product tests, including HTTP process integration
+  house-staticduo/     # Identity and composition only
+  house-pocharlies/    # Identity and composition only
+tests/integration/    # Browser E2E; extension artifact supplied by configuration
+entrypoints/          # Root dist compatibility wrappers
 ```
-src/
-├── index.ts           # Entry point
-├── server.ts          # MCP server implementation
-├── context.ts         # Extension communication context
-├── ws-server.ts       # WebSocket server for extension
-├── types.ts           # TypeScript type definitions
-├── tools/             # Tool implementations
-│   ├── index.ts       # Tool registry
-│   ├── navigation.ts  # Navigate, back, forward, reload
-│   ├── snapshot.ts    # ARIA snapshot
-│   ├── interaction.ts # Click, type, hover, drag
-│   ├── queries.ts     # Get text, attributes, visibility
-│   ├── tabs.ts        # Tab management
-│   └── utility.ts     # Wait, screenshot, console logs
-└── utils/             # Utilities
-    ├── logger.ts      # Logging
-    └── port.ts        # Port management
+
+The root owns the only lockfile. `npm ci`, `npm run typecheck`, `npm test`,
+`npm run build`, `npm start` and `npm run dev` remain root commands.
+The two house packages compose the same core; they contain no tool copies,
+domains, credentials or deployment configuration.
+
+Browser integration uses an unpacked extension artifact supplied through
+`BROWSER_EXTENSION_PATH` (default `./test-artifacts/extension`). It never
+requires a neighboring checkout. Example after building the server:
+
+```sh
+BROWSER_EXTENSION_PATH=/path/to/pinned/extension npm run test:e2e
 ```
+
+See [migration inventory](docs/migration-inventory.md) and the
+[current wire contract](docs/contracts/browser-harness-v1.md).
 
 ## Tech Stack
 

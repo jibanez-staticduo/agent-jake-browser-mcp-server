@@ -15,7 +15,7 @@ import { WebSocket } from 'ws';
 import AdmZip from 'adm-zip';
 import { configEntryName, extensionConfigJson, patchZipConfig } from '../src/extension-zip.ts';
 
-const repoRoot = dirname(fileURLToPath(new URL('.', import.meta.url)));
+const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
 
 const basePort = 21500 + Math.floor(Math.random() * 300) * 4;
 const httpPort = basePort;
@@ -82,7 +82,7 @@ async function startServer(options: {
   delete env.BROWSER_PUBLIC_WS_URL;
   if (options.publicWsUrl) env.BROWSER_PUBLIC_WS_URL = options.publicWsUrl;
 
-  const child = spawn(process.execPath, ['--import', 'tsx', 'http-server.js'], {
+  const child = spawn(process.execPath, ['dist/http-server.js'], {
     cwd: repoRoot,
     stdio: ['ignore', 'pipe', 'pipe'],
     env,
@@ -365,6 +365,8 @@ describe('tools/call through an MCP session', () => {
     });
     expect(result.isError).toBeUndefined();
     expect(extension.messages).toHaveLength(1);
+    expect(Object.keys(extension.messages[0]).sort()).toEqual(['id', 'payload', 'type']);
+    expect(extension.messages[0].id).toEqual(expect.any(String));
     expect(extension.messages[0]).toMatchObject({
       type: 'browser_navigate',
       payload: { url: 'https://example.com' },
