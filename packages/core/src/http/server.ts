@@ -37,10 +37,10 @@ export interface HttpServer {
 export function createHttpServer(options: HttpServerOptions = {}): HttpServer {
   const PORT = options.port ?? Number(process.env.MCP_HTTP_PORT || 8000);
   const WS_PORT = options.wsPort ?? Number(process.env.BROWSER_WS_PORT || 8765);
-  const HTTP_HOST = options.host ?? process.env.MCP_HTTP_HOST ?? '127.0.0.1';
+  const HTTP_HOST = options.host ?? (process.env.MCP_HTTP_HOST || '127.0.0.1');
   const EXTENSION_ZIP =
-    options.extensionZip ?? process.env.BROWSER_EXTENSION_ZIP ?? '/app/extension/agent-jake-browser-extension.zip';
-  const WS_PATH = options.wsPath ?? process.env.BROWSER_WS_PATH ?? '/';
+    options.extensionZip ?? (process.env.BROWSER_EXTENSION_ZIP || '/app/extension/agent-jake-browser-extension.zip');
+  const WS_PATH = options.wsPath ?? (process.env.BROWSER_WS_PATH || '/');
 
   const CONNECTION_FIELD = {
     type: 'string',

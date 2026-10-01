@@ -15,6 +15,25 @@ async function freePort(): Promise<number> {
 }
 
 describe('compiled product entrypoints', () => {
+  it('keeps loopback binding when the HTTP host environment value is empty and closes cleanly', async () => {
+    const previous = process.env.MCP_HTTP_HOST;
+    process.env.MCP_HTTP_HOST = '';
+    const { createHttpServer } = await import('@agent-jake-browser/core');
+    const server = createHttpServer({ port: 0, wsPort: 0 });
+    try {
+      const listener = await server.listen();
+      const address = listener.address();
+      expect(address && typeof address !== 'string' ? address.address : null).toBe('127.0.0.1');
+      if (address && typeof address !== 'string') {
+        expect(await (await fetch(`http://127.0.0.1:${address.port}/healthz`)).text()).toBe('ok');
+      }
+    } finally {
+      await server.close();
+      if (previous === undefined) delete process.env.MCP_HTTP_HOST;
+      else process.env.MCP_HTTP_HOST = previous;
+    }
+  });
+
   it('imports the core and house packages without opening listeners or timers', () => {
     const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
       import { createServer, createHttpServer } from '@agent-jake-browser/core';

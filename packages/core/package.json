@@ -20,7 +20,7 @@
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --config ../../vitest.config.ts",
+    "test": "npm --prefix ../.. test -- packages/core/tests",
     "dev": "tsup --watch"
   },
   "dependencies": {
@@ -31,6 +31,7 @@
     "tsx": "^4.20.5",
     "ws": "^8.21.3",
     "zod": "^4.3.5",
-    "zod-to-json-schema": "^3.25.1"
+    "zod-to-json-schema": "^3.25.1",
+    "@types/express": "^5.0.6"
   }
 }
