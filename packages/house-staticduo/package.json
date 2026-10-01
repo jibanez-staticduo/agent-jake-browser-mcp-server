@@ -15,7 +15,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts --out-dir dist",
+    "build": "tsup",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

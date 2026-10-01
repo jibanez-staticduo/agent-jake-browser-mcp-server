@@ -20,7 +20,8 @@
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --config ../../vitest.config.ts"
+    "test": "vitest run --config ../../vitest.config.ts",
+    "dev": "tsup --watch"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.1",
