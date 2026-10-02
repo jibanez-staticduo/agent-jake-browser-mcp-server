@@ -1,6 +1,7 @@
-# Browser Harness M1B: proposed shared contract
+# Browser Harness M1B: shared contract and A-F resolution
 
-Date: 2026-10-01. Status: proposal for agreement with Oppo through Marlin.
+Date: 2026-10-01; resolution updated 2026-10-02. Status: Codex A-F contract
+resolution frozen for implementation planning; publish/relay the exact paired heads.
 This PR contains design only. It does not implement a new wire, publish a package,
 merge implementation PRs, alter configuration, or deploy an image.
 
@@ -47,6 +48,17 @@ legacy support needs explicit operator enablement, an owner and a removal plan;
 it never activates because hello failed. Existing deployments retain their current
 configuration until that separate transition is approved.
 
+Retirement is mandatory once both conditions are met: the separately authorized
+rollout has migrated the clients of both houses (StaticDuo Main/ARI/Fedora and
+Pocharlies NAS), and at least 14 full days have passed since the retirement notice
+in topic 374. Each house still using legacy owns its client inventory, migration
+and endpoint removal. The notice records the earliest removal date and outstanding
+clients; remove legacy at the later of that date and verified completion of both
+houses' migration, without an indefinite operator opt-out. If migration is delayed,
+report the remaining clients and owner in the same thread. Neither the notice nor
+this retirement rule authorizes rollout, credential resets or silent downgrade.
+Keep executable legacy fixtures even after the deployed legacy endpoint is removed.
+
 ## Source and distribution
 
 Propose `@agent-jake-browser/protocol`, sourced only in server `packages/protocol`.
@@ -85,6 +97,16 @@ order. Descriptors contain JSON-serializable metadata only. One pure serializer
 and build-produced digest are shared. CI recomputes it. Initial policy is exact
 digest equality, with no automatic schema/hash tolerance. A future compatibility
 table requires a reviewed contract change.
+
+The packed protocol's `package.json` contains generated `browserHarnessProtocol`
+metadata: `supportedProtocolVersions` and `catalogVersion`. The packed descriptor
+data and exported digest come from that same build. Offline verification recomputes
+the digest from the packed descriptors and checks it against the packed manifest,
+exports and pinned provenance, before connecting or installing consumers. Tampered
+descriptors, a stale manifest or a mismatched TGZ hash fail verification. This is
+integrity tied to the separately verified source/TGZ pin, not a cryptographic
+publisher signature: a hash alone cannot authenticate a malicious replacement of
+both descriptors and metadata. No new signing-key service is introduced in M1B.
 
 ## Proposed negotiated messages
 
@@ -164,10 +186,41 @@ negotiateVersion(serverVersions: readonly number[],
 
 `negotiateVersion` returns the greatest common supported integer without mutating
 inputs; the wire schema rejects empty, duplicate, non-positive or oversized lists.
-Proposed limits: 16 versions, 128 capability names, 128 UTF-8 bytes per identifier,
-and 5 seconds for hello. Tool/response payload bounds must accommodate existing
-screenshots and file operations; finalize those bounds from current fixtures
-before enabling negotiated runtime, rather than impose a guessed low limit.
+Contract limits: 16 versions, 128 capability names, 128 UTF-8 bytes per identifier,
+and 5 seconds for hello. The negotiated payload limit is **32 MiB = 33,554,432 bytes**
+per complete, reassembled, uncompressed UTF-8 JSON WS message, in either direction,
+including the envelope and encoded image/file data. This amends the proposed
+8 MB ceiling rather than silently change its unit. Existing browser_drop admits
+10 MiB raw files, producing 13,981,016 base64 bytes before envelope, plus 1 MiB
+raw MIME data which may expand with JSON escaping. 8 MiB would reject that supported
+file budget. The 32 MiB bound accommodates that known encoding budget and reduces
+the current server default 100 MiB inbound allowance. It does not establish that
+all unbounded screenshot/PDF/metadata inputs fit; measure complete messages.
+Synthetic negotiated JSON.stringify envelopes with the full 10 MiB file budget
+and maximal NUL MIME value (1 MiB combined type/value, sixfold JSON escaping)
+measure 20,272,748 bytes for one file and 20,273,260 bytes for eight files with
+representative metadata. These measurements explain the selected bound, not a
+universal metadata bound or a browser runtime test. Fragmenting
+or compressing a message does not increase the permitted logical size. Check size
+before JSON parsing on receipt and before enqueue/send on transmission; server
+transport limits also bound reassembly/decompression. The browser transport may
+allocate the received message before JS can inspect it, so do not claim preallocation
+protection on the extension merely from its application-size check.
+
+Inbound excess closes with standard WS code `1009`; local oversize requests fail
+with `payload_too_large` before send/action and clean pending state. If a completed
+action produces an oversize result, send a bounded `payload_too_large` error instead
+of truncating/replaying it; this does not undo the completed action. No automatic
+retry, fallback or per-message limit override. A future limit change must update
+both protocol consumers and their reviewed compatibility fixtures.
+
+Before negotiated runtime delivery, measure real serialized screenshot/file/tool
+fixtures and execute exact-limit, limit+1, multibyte UTF-8, fragmented and compressed
+message tests in both directions. A ZIP downloaded over HTTP is not a WS payload
+fixture and cannot establish this limit's compatibility. This design sets the
+limit; it does not claim the existing largest browser payloads have been measured
+or that the new bound has passed runtime QA. Oversize supported workflows require
+a separate reviewed transport design or contract revision, not a silent bypass.
 
 Success requires `ok:true` and no error; failure requires `ok:false` and error,
 with no data. Results echo session and connection IDs and must match the pending
@@ -316,20 +369,34 @@ cannot resolve in another session/profile. The extension carries a validated
 explicit target into handlers; it never falls back to a shared active/global tab.
 Tabless and tab-creating tools are described explicitly in the catalog.
 
-Handle continuity across ordinary WS reconnect is required while identity/epoch
-and the tab incarnation are still proven. Worker restart loses globals: persist
-only session-local handle metadata in `chrome.storage.session`, validate live tabs,
+Handle invalidation is conservative by default: without positive proof of the
+same authorized session/browser, profile epoch and live tab incarnation, the old
+handle is dead (`tab_handle_invalid`). Ordinary reconnect continuity is enabled
+only when a real test demonstrates that proof, including missed close/reuse cases.
+No worker-restart continuity is promised by default. Worker restart loses globals:
+persist only session-local handle metadata in `chrome.storage.session`, validate live tabs,
 and invalidate conservatively where incarnation cannot be proved. A numeric
 `tabs.get(tabId)` alone is not proof that a missed close/reuse did not occur.
 The exact incarnation/recovery algorithm is a separate M1B implementation design
-gate with Oppo; this proposal does not claim to solve CDP scoping or invisible
-worker lifecycle. If conservative recovery conflicts with required continuity,
-agree that contract explicitly before shipping handles.
+gate with Oppo; this resolution fixes conservative invalidation as the contract
+until a positively proven recovery algorithm passes its gate. It does not claim
+to solve CDP scoping or invisible worker lifecycle. Validating a numeric ID or
+finding session-storage metadata alone never enables continuity.
 
 Catalog capabilities include optional `op-safe/browser_fillsecret` and operations
 requiring Linux file-descriptor guarantees. No implementation ->
 `capability_unavailable` before action; advertised but failed -> distinct execution
-error. Client claims do not elevate permissions. Secret-provider/execFile adapters
+error. For a retained authenticated binding to the same logical browser, record
+the effective capabilities previously negotiated for that session/browser. If a
+required capability was available there but is absent after a verified reconnect,
+the attempted tool returns `capability_revoked`; if it was never available, return
+`capability_unavailable`. Both fail before dispatch and with no degraded operation.
+If legitimately restored in a later ack, the tool may run after normal authorization
+checks. A new session or explicit selection of another browser resets that history;
+the old browser's capabilities never authorize the new one. History is server-owned,
+not client claims, and capability_revoked does not replace auth/revocation errors.
+Disconnected browsers still return browser_disconnected until a valid READY ack.
+Client claims do not elevate permissions. Secret-provider/execFile adapters
 belong outside core, with no secrets in prompts/logs/chats. Preserve default denial
 of `browser_run_code_unsafe`, pinned-directory protections and Copilot lease/gate.
 On macOS, unavailable safe filesystem guarantees remain unavailable, with no
@@ -348,12 +415,15 @@ insecure fallback. Actual house adapter work and CDP allowlists remain M2.
 | Existing old/old installation | Unchanged until separate authorized rollout |
 | Wrong credential / foreign response / foreign tab | Rejected, no cross-owner execution or pending settlement |
 | Missing capability | `capability_unavailable`; no degraded operation |
+| Capability lost on same verified binding after reconnect | `capability_revoked`; no action; restoration requires a valid later ack |
+| Oversize negotiated message | 1009 inbound / `payload_too_large` local; no truncation or replay |
 
 Stable errors: `protocol_version_mismatch`, `catalog_version_mismatch`,
 `hello_required`, `hello_timeout`, `invalid_message`, `browser_selection_required`,
 `browser_unavailable`, `browser_not_found`, `browser_disconnected`, `session_busy`,
 `session_closed`, `request_cancelled`, `request_timeout`, `tab_handle_invalid`,
-`capability_unavailable`, `response_correlation_mismatch`. Error messages are bounded,
+`capability_unavailable`, `capability_revoked`, `payload_too_large`,
+`response_correlation_mismatch`. Error messages are bounded,
 redacted and visible in MCP text as well as structured content where appropriate.
 
 Keep both legacy wire suites under an explicitly legacy fixture/adapter. New hello
@@ -361,13 +431,35 @@ tests coexist; changing those old assertions into new-wire assertions would eras
 the M1A regression guarantee agreed in Oppo message 1400. Temporary legacy access
 has only its documented old security guarantees and is not exposed multi-house.
 
-## Agreement and implementation boundaries
+## Codex resolution of Oppo amendments A-F (2026-10-02)
 
-Oppo is asked to agree/amend: endpoint transition and legacy retirement; package
-namespace/version and TGZ provenance; hello additions and echoed IDs; trusted MCP
-boundary/ACL and enrollment migration; selector/reconnect semantics; resource
-limits/close codes; handle recovery proof. These are proposals, not already accepted
-runtime contracts. Agreement should refer to the two exact design PR heads.
+Oppo message 1413 accepts the proposal as a base and permits documented acceptance
+or reasoned amendment of A-F. His later clarification accepts hash versus signature
+and measuring actual WS payloads. Canonical destinations remain Pocharlies `master`
+under INFRA-302; the older topic 315 proposal does not change those destinations.
+
+| Item | Decision and reason |
+| --- | --- |
+| A - legacy retirement | Accept: both authorized house migrations complete, at least 14 days' notice in topic 374, each house with legacy clients owns removal; no permanent exception |
+| B - packaged catalog hash | Accept offline manifest/descriptor verification; amend the word signed to integrity-checked, since no signing key/trust chain exists and a digest is not a publisher signature |
+| C - capability_revoked | Accept: distinguish never available from lost on the same authenticated session/browser binding, with explicit restoration/reset semantics |
+| D - MCP trust boundary | Accept: installationId remains non-authoritative; make shared-token+UUID impersonation/live replacement/reconnect tests mandatory before negotiated enablement |
+| E - payload limit | Amend 8 MB to 32 MiB (33,554,432 bytes): a supported 10 MiB drop already exceeds 13 MiB in base64; limit whole uncompressed UTF-8 JSON messages bidirectionally, with real WS boundary fixtures, not HTTP ZIP evidence |
+| F - handle recovery | Accept: default invalidate without positive proof; enable continuity only after tests prove session/browser/epoch/incarnation and missed close/reuse safety |
+
+These decisions freeze the contract policies for implementation planning at the
+published paired heads. Enrollment implementation/migration, resource caps other
+than the fixed payload/hello bounds, and the optional positive handle-recovery
+algorithm still need their concrete implementation designs/tests. Their absence
+does not permit weaker identity or guessed continuity. This freeze is not a merge
+decision, implemented runtime verification or permission to roll out an image.
+
+The existing new_tab result mismatch is separate from negotiation and will receive
+a small core bug-fix PR before M1B runtime work, rather than hide in protocol changes.
+Request the original repository/full SHA or reviewable PR from Oppo if available;
+the four historical short SHAs are currently unverified. Test the actual extension
+`{tab:{id}}` result and malformed/missing-ID failure; do not make up an ID or undo
+the default background-tab behavior. No bug-fix implementation is part of this PR.
 
 Split implementation into contract/negotiation, identity+session routing, and
 handles+capability projections. Each pair of implementation PRs must preserve old
