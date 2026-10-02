@@ -4,6 +4,18 @@
 import { z } from 'zod';
 import { createTool, textResult, errorResult } from './types.js';
 import type { Tool } from '../types.js';
+import { MAX_KEEP_MINUTES } from '../tab-reaper.js';
+
+/** Handled by the server (src/tab-reaper.ts); never sent to the extension. */
+const KEEP_OPEN_MINUTES = z.number()
+  .int()
+  .min(1)
+  .max(MAX_KEEP_MINUTES)
+  .optional()
+  .describe(
+    `Keep this tab open for this many minutes even if your session ends or leaves it idle (max ${MAX_KEEP_MINUTES}). ` +
+    'Only for a tab that must outlive the session, such as a payment waiting for a person.',
+  );
 
 /**
  * Open a new tab.
@@ -13,13 +25,16 @@ export const newTabTool: Tool = createTool({
   description:
     'Open a URL in a new browser tab and connect to it. The tab opens in the ' +
     'BACKGROUND so it does not steal the user\'s view; use switchTo: true only ' +
-    'when the user is meant to see it.',
+    'when the user is meant to see it. Tabs you open close by themselves when your ' +
+    'MCP session ends or after 60 minutes without use; keepOpenMinutes holds one open ' +
+    'longer (e.g. a payment screen waiting for a person).',
   schema: z.object({
     url: z.string().url().describe('URL to open in the new tab'),
     switchTo: z.boolean()
       .optional()
       .default(false)
       .describe('Bring the new tab to the front after opening it (default: false, stays in background)'),
+    keepOpenMinutes: KEEP_OPEN_MINUTES,
   }),
   async handle(context, params) {
     const response = await context.send('browser_new_tab', {
@@ -31,8 +46,9 @@ export const newTabTool: Tool = createTool({
       return errorResult(response.error?.message ?? 'New tab failed');
     }
 
-    const result = response.result as { tabId: number };
-    return textResult(`Opened new tab (id: ${result.tabId}) with ${params.url}`);
+    // The extension answers { tab: { id, ... } }; older builds answered { tabId }.
+    const result = response.result as { tab?: { id?: number }; tabId?: number };
+    return textResult(`Opened new tab (id: ${result.tab?.id ?? result.tabId}) with ${params.url}`);
   },
 });
 
@@ -86,9 +102,12 @@ export const listTabsTool: Tool = createTool({
  */
 export const switchTabTool: Tool = createTool({
   name: 'browser_switch_tab',
-  description: 'Switch to a different browser tab by its ID.',
+  description:
+    'Switch to a different browser tab by its ID. With keepOpenMinutes, a tab this ' +
+    'session opened stays open that long even after the session ends.',
   schema: z.object({
     tabId: z.number().describe('ID of the tab to switch to'),
+    keepOpenMinutes: KEEP_OPEN_MINUTES,
   }),
   async handle(context, params) {
     const response = await context.send('browser_switch_tab', {
