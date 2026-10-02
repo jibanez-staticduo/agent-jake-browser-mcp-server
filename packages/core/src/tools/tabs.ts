@@ -5,6 +5,10 @@ import { z } from 'zod';
 import { createTool, textResult, errorResult } from './types.js';
 import type { Tool } from '../types.js';
 
+const newTabResultSchema = z.object({
+  tab: z.object({ id: z.number().int().nonnegative() }),
+});
+
 /**
  * Open a new tab.
  */
@@ -31,8 +35,11 @@ export const newTabTool: Tool = createTool({
       return errorResult(response.error?.message ?? 'New tab failed');
     }
 
-    const result = response.result as { tabId: number };
-    return textResult(`Opened new tab (id: ${result.tabId}) with ${params.url}`);
+    const result = newTabResultSchema.safeParse(response.result);
+    if (!result.success) {
+      return errorResult('New tab response is missing a valid tab.id');
+    }
+    return textResult(`Opened new tab (id: ${result.data.tab.id}) with ${params.url}`);
   },
 });
 

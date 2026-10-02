@@ -1,12 +1,14 @@
 /** Executable documentation of the M1A wire; keep alongside M1B negotiation tests. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { once } from 'node:events';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import { createWSServer, type WSServer } from '../src/ws-server.js';
 import { createTokenStore } from '../src/token-store.js';
+import { newTabTool } from '../src/tools/tabs.js';
+import type { Context } from '../src/types.js';
 import type { ExtensionMessage, ExtensionResponse } from '../src/types.js';
 
 let server: WSServer;
@@ -48,6 +50,52 @@ afterEach(async () => {
 });
 
 describe('current M1A WebSocket wire contract', () => {
+  async function openTab(reply: Omit<ExtensionResponse, 'id'>, switchTo?: boolean) {
+    const context: Context = {
+      send: (type, payload = {}) => server.sendTo('wire-fixture', {
+        id: 'new-tab-contract', type, payload,
+      }),
+      isConnected: () => true,
+      listConnections: () => [],
+    };
+    const pending = newTabTool.handle(context, { url: 'https://example.test/', switchTo });
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    expect(requests[0]).toStrictEqual({
+      id: 'new-tab-contract', type: 'browser_new_tab',
+      payload: { url: 'https://example.test/', switchTo: switchTo ?? false },
+    });
+    socket!.send(JSON.stringify({ ...reply, id: 'new-tab-contract' }));
+    return pending;
+  }
+
+  it.each([
+    ['default', undefined], ['foreground', true],
+  ] as const)('reads tab.id from the verified %s producer fixture', async (name, switchTo) => {
+    const fixture: ExtensionResponse = JSON.parse(readFileSync(
+      new URL(`./fixtures/new-tab/${name}.json`, import.meta.url), 'utf8',
+    ));
+    const result = await openTab(fixture, switchTo);
+    expect(result.isError).not.toBe(true);
+    expect(result.content[0].text).toContain('(id: 42)');
+  });
+
+  it.each([
+    undefined, null, {}, { tabId: 42 }, { tab: null }, { tab: {} },
+    { tab: { id: '42' } }, { tab: { id: -1 } }, { tab: { id: 1.5 } },
+  ])('rejects a successful envelope without a valid tab.id: %j', async (result) => {
+    const reply = await openTab({ success: true, result });
+    expect(reply.isError).toBe(true);
+    expect(reply.content[0].text).not.toContain('Opened new tab');
+  });
+
+  it('preserves the extension failure instead of reporting a created tab', async () => {
+    const reply = await openTab({
+      success: false, error: { code: 'TAB_CREATE_FAILED', message: 'Cannot create tab' },
+    });
+    expect(reply.isError).toBe(true);
+    expect(reply.content[0].text).toContain('Cannot create tab');
+  });
+
   it('sends only id/type/payload and correlates success/error replies by id', async () => {
     const successRequest: ExtensionMessage = {
       id: 'wire-success', type: 'browser_navigate', payload: { url: 'https://example.test/' },

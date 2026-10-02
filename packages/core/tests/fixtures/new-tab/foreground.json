@@ -1,0 +1,13 @@
+{
+  "id": "new-tab-foreground",
+  "success": true,
+  "result": {
+    "tab": {
+      "id": 42,
+      "url": "https://example.test/",
+      "title": "Example",
+      "active": true,
+      "connected": true
+    }
+  }
+}
