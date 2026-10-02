@@ -213,6 +213,7 @@ describe('tab reaper', () => {
 
     await call('s2', 'browser_list_tabs');
     await call('s2', 'browser_send_to_back');
+    await call('s2', 'browser_new_tab', { url: 'https://other.example/' }); // touches before it opens
     browser.open = true;
     await reaper.sweep();
     expect(browser.tabs.has(100)).toBe(false);
