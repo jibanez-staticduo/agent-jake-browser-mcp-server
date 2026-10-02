@@ -12,6 +12,7 @@ import { getSharedTokenStore } from './src/token-store.ts';
 import { createPairingStore } from './src/pairing-store.ts';
 import { patchZipConfig } from './src/extension-zip.ts';
 import { parseLabels, nameOf, resolveTarget, findConnection } from './src/connection-target.ts';
+import { createTabReaper, idleMinutesFromEnv } from './src/tab-reaper.ts';
 
 const PORT = Number(process.env.MCP_HTTP_PORT || 8000);
 const WS_PORT = Number(process.env.BROWSER_WS_PORT || 8765);
@@ -44,6 +45,19 @@ const context = createContext({ port: WS_PORT });
 const tokenStore = getSharedTokenStore();
 const allTools = getAllTools();
 const toolMap = new Map(allTools.map((tool) => [tool.schema.name, tool]));
+
+// Agent tabs close when their MCP session ends or after this long without use (src/tab-reaper.ts).
+const TAB_IDLE_MINUTES = idleMinutesFromEnv();
+const tabReaper = TAB_IDLE_MINUTES > 0
+  ? createTabReaper({
+      idleMs: TAB_IDLE_MINUTES * 60_000,
+      send: (connectionId, type, payload) => context.send(type, payload, connectionId),
+      listConnections: () => context.listConnections(),
+    })
+  : null;
+if (tabReaper) {
+  setInterval(() => void tabReaper.sweep(), 5 * 60_000).unref();
+}
 
 const pairing = createPairingStore({
   issueToken: (record) =>
@@ -87,6 +101,7 @@ function textContent(text, isError) {
 async function callTool(name, rawArgs, sessionId) {
   const tool = toolMap.get(name);
   if (!tool) return textContent(`Unknown tool: ${name}`, true);
+  tabReaper?.touchSession(sessionId);
 
   const args = { ...(rawArgs ?? {}) };
   const requested =
@@ -133,7 +148,9 @@ async function callTool(name, rawArgs, sessionId) {
   if (!target.ok) return textContent(target.error, true);
   if (target.sticky && sessionId) sessionDefaults.set(sessionId, target.connectionId);
 
-  return tool.handle(context.forConnection(target.connectionId), args);
+  const bound = context.forConnection(target.connectionId);
+  const keepOpenMinutes = typeof args.keepOpenMinutes === 'number' ? args.keepOpenMinutes : undefined;
+  return tool.handle(tabReaper ? tabReaper.track(bound, sessionId, target.connectionId, keepOpenMinutes) : bound, args);
 }
 
 function createMcpServer() {
@@ -403,6 +420,7 @@ app.post('/mcp', async (req, res) => {
       });
       transport.onclose = () => {
         if (transport.sessionId) {
+          void tabReaper?.sessionClosed(transport.sessionId);
           transports.delete(transport.sessionId);
           servers.delete(transport.sessionId);
           sessionDefaults.delete(transport.sessionId);

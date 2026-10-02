@@ -24,6 +24,7 @@ Node 22, TypeScript 5.9, tsup 8.5, `@modelcontextprotocol/sdk` ^1.30.1, express 
 - `src/token-store.ts` y `src/pairing-store.ts`: emisión y verificación de tokens; la autenticación del handshake WebSocket va solo ahí (`verifyClient` en `src/ws-server.ts`).
 - `src/connection-target.ts`: qué navegador recibe cada llamada.
 - `http-server.js`: transporte HTTP streamable (`/mcp`), rutas de pairing y `POST /extension/reload` (solo loopback).
+- `src/tab-reaper.ts`: qué pestañas abrió cada sesión MCP y su cierre al acabar la sesión o por inactividad; lo cablea `http-server.js`.
 
 ## Cómo se construye
 
@@ -35,12 +36,13 @@ Una herramienta nueva = fichero en `src/tools/` + registro en `src/tools/index.t
 
 ## CI/CD y despliegue
 
-`ci.yml` en `arc-k8s`: `build-test` (tsc + vitest, Node 22.23.2 verificado por sha256) y `deltas` (`scripts/check-deltas.sh`: sin bind fijo a `0.0.0.0`, `verifyClient` presente, `stateTools` registrado); además los workflows estándar `duplicados.yml` y `pr-review.yml`. El despliegue lo lleva `k8s-agentjake-browser-mcp-pocharlies` (ArgoCD); este repo no se despliega solo.
+`ci.yml` en `arc-k8s`: `build-test` (tsc + vitest, Node 22.23.2 verificado por sha256) y `deltas` (`scripts/check-deltas.sh`: sin bind fijo a `0.0.0.0`, `verifyClient` presente, `stateTools` registrado, `tabReaper` cableado); además los workflows estándar `duplicados.yml` y `pr-review.yml`. El despliegue lo lleva `k8s-agentjake-browser-mcp-pocharlies` (ArgoCD); este repo no se despliega solo.
 
 ## Decisiones y trampas
 
-- Los tres `deltas` de `check-deltas.sh` son la defensa frente a un auto-update del upstream: nunca se retiran.
+- Los cuatro `deltas` de `check-deltas.sh` son la defensa frente a un auto-update del upstream: nunca se retiran.
 - El WebSocket nunca escucha en `0.0.0.0` sin token; el handshake exige token.
 - `browser_fill_secret` lee `op://…` en el servidor: el secreto no pasa por el transcript del agente.
 - Renombrar una herramienta MCP rompe a todas las sesiones: se añade una nueva y se deja la vieja.
+- Las pestañas que abre un agente (`browser_new_tab` o un clic que abre otra) se cierran solas al acabar su sesión MCP o tras 60 min sin uso (`src/tab-reaper.ts`; `AGENT_BROWSER_TAB_IDLE_MINUTES`, 0 lo apaga). Las que no abrió el agente no se tocan nunca. `keepOpenMinutes` (máx. 1440) en `browser_new_tab`/`browser_switch_tab` retiene la de un pago que espera a Dani; si su sesión acabó y otra trabaja en ella (`confirmar_pago`), pasa a ser de esa. Solo en el transporte HTTP: en stdio el proceso es la sesión y es local de un solo usuario. El registro vive en memoria: un reinicio del pod olvida las pestañas abiertas antes. Cierra por id solo en un navegador cuya extensión anuncia `closeById` en `browser_list_tabs` (`agent-browser-extension#18`; las anteriores cerraban la conectada) y da el cierre por bueno solo si la extensión devuelve ese id.
 - Clones duplicados en el host: ver C5 de SC-1425.
