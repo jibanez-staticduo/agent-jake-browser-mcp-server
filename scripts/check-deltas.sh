@@ -16,4 +16,5 @@ chk "1 WS server no escucha fijo en 0.0.0.0"        bash -c "! grep -q \"host: '
 chk "1b WS server verifica token en handshake"      grep -q verifyClient src/ws-server.ts
 chk "7b browser_state registrado en el server"      grep -q stateTools src/tools/index.ts
 chk "8 pestañas del agente se cierran (tab-reaper)"   grep -q tabReaper http-server.js
+chk "fill_secret y type no esconden el aviso de longitud de la extensión" grep -q "fieldWarning(response.result)" src/tools/interaction.ts
 exit $fail
