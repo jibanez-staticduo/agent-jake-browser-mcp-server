@@ -1,0 +1,125 @@
+/**
+ * Each MCP session works in its own tab, even when several share one browser.
+ */
+import { describe, it, expect } from 'vitest';
+import { createSessionTabs } from '../src/session-tabs.ts';
+import type { Context, ExtensionResponse, ToolName } from '../src/types.ts';
+
+/** One browser: the extension follows a single connected tab, like the real one. */
+function fakeBrowser() {
+  const sent: Array<{ type: ToolName; payload: Record<string, unknown> }> = [];
+  const state = { connected: 1 as number | null, nextId: 100, open: new Set([1]), inFlight: 0, maxInFlight: 0 };
+  const respond = async (type: ToolName, payload: Record<string, unknown>): Promise<ExtensionResponse> => {
+    sent.push({ type, payload });
+    state.inFlight++; state.maxInFlight = Math.max(state.maxInFlight, state.inFlight);
+    await new Promise((r) => setTimeout(r, 5));
+    state.inFlight--;
+    const target = payload.targetTabId as number | undefined;
+    if (target !== undefined) {
+      if (!state.open.has(target)) return { id: '', success: false, error: { code: 'TAB_GONE', message: 'gone' } };
+      state.connected = target;
+    }
+    if (type === 'browser_new_tab') {
+      const id = state.nextId++; state.open.add(id); state.connected = id;
+      return { id: '', success: true, result: { tab: { id, url: String(payload.url), connected: true } } };
+    }
+    if (type === 'browser_switch_tab') { state.connected = payload.tabId as number; return { id: '', success: true, result: {} }; }
+    if (type === 'browser_close_tab') {
+      const closed = (payload.tabId as number | undefined) ?? state.connected!;
+      state.open.delete(closed); if (state.connected === closed) state.connected = null;
+      return { id: '', success: true, result: { closed: true, tabId: closed } };
+    }
+    return { id: '', success: true, result: { actedOn: state.connected } };
+  };
+  const context = { send: respond, isConnected: () => true, listConnections: () => [] } as unknown as Context;
+  return { context, sent, state };
+}
+
+describe('session tabs', () => {
+  it('sends each session\'s commands to its own tab, however they interleave', async () => {
+    const browser = fakeBrowser();
+    const tabs = createSessionTabs();
+    const a = tabs.route(browser.context, 'A', 'x86');
+    const b = tabs.route(browser.context, 'B', 'x86');
+
+    await a.send('browser_new_tab', { url: 'https://a.test' }); // 100
+    await b.send('browser_new_tab', { url: 'https://b.test' }); // 101, now the connected one
+    const ra = await a.send('browser_click', { selector: '#go' });
+    const rb = await b.send('browser_type', { selector: '#q', text: 'x' });
+
+    expect((ra.result as { actedOn: number }).actedOn).toBe(100);
+    expect((rb.result as { actedOn: number }).actedOn).toBe(101);
+    expect(browser.sent.find((m) => m.type === 'browser_click')?.payload).toEqual({ selector: '#go', targetTabId: 100 });
+  });
+
+  it('runs one command at a time per browser', async () => {
+    const browser = fakeBrowser();
+    const tabs = createSessionTabs();
+    const a = tabs.route(browser.context, 'A', 'x86');
+    const b = tabs.route(browser.context, 'B', 'x86');
+    await a.send('browser_new_tab', { url: 'https://a.test' });
+    await b.send('browser_new_tab', { url: 'https://b.test' });
+
+    await Promise.all([a.send('browser_click', {}), b.send('browser_click', {}), a.send('browser_type', { text: 'y' })]);
+
+    expect(browser.state.maxInFlight).toBe(1);
+  });
+
+  it('stops a session without a tab from acting in another session\'s tab', async () => {
+    const browser = fakeBrowser();
+    const tabs = createSessionTabs();
+    await tabs.route(browser.context, 'A', 'x86').send('browser_new_tab', { url: 'https://a.test' });
+
+    const r = await tabs.route(browser.context, 'C', 'x86').send('browser_click', { selector: '#buy' });
+
+    expect(r.success).toBe(false);
+    expect(r.error?.code).toBe('NO_SESSION_TAB');
+    expect(browser.sent.filter((m) => m.type === 'browser_click')).toHaveLength(0);
+  });
+
+  it('lets a session without a tab use the browser when no session owns the connected tab', async () => {
+    const browser = fakeBrowser();
+    const tabs = createSessionTabs();
+    const r = await tabs.route(browser.context, 'A', 'x86').send('browser_state', {});
+    expect(r.success).toBe(true);
+    expect(browser.sent[0].payload).toEqual({});
+  });
+
+  it('forgets a session tab that is gone, and one the session closed', async () => {
+    const browser = fakeBrowser();
+    const tabs = createSessionTabs();
+    const a = tabs.route(browser.context, 'A', 'x86');
+    await a.send('browser_new_tab', { url: 'https://a.test' }); // 100
+    browser.state.open.delete(100); // the user closed it
+
+    const r = await a.send('browser_click', {});
+    expect(r.error?.code).toBe('TAB_GONE');
+    expect(tabs.tabOf('A', 'x86')).toBeUndefined();
+
+    await a.send('browser_new_tab', { url: 'https://a2.test' }); // 101
+    await a.send('browser_close_tab', {});
+    expect(tabs.tabOf('A', 'x86')).toBeUndefined();
+    expect(browser.sent.at(-1)?.payload).toEqual({ targetTabId: 101 });
+  });
+
+  it('switch_tab makes that tab the session\'s; browser_wait neither routes nor queues', async () => {
+    const browser = fakeBrowser();
+    const tabs = createSessionTabs();
+    const a = tabs.route(browser.context, 'A', 'x86');
+    await a.send('browser_switch_tab', { tabId: 1 });
+    expect(tabs.tabOf('A', 'x86')).toBe(1);
+    await a.send('browser_wait', { time: 0 });
+    expect(browser.sent.at(-1)).toEqual({ type: 'browser_wait', payload: { time: 0 } });
+  });
+
+  it('forgets everything of a session when it ends', async () => {
+    const browser = fakeBrowser();
+    const tabs = createSessionTabs();
+    await tabs.route(browser.context, 'A', 'x86').send('browser_new_tab', { url: 'https://a.test' });
+    tabs.sessionClosed('A');
+    expect(tabs.tabOf('A', 'x86')).toBeUndefined();
+    // the connected tab no longer belongs to anyone: a new session may use the browser
+    const r = await tabs.route(browser.context, 'B', 'x86').send('browser_state', {});
+    expect(r.success).toBe(true);
+  });
+});

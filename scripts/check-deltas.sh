@@ -17,4 +17,5 @@ chk "1b WS server verifica token en handshake"      grep -q verifyClient src/ws-
 chk "7b browser_state registrado en el server"      grep -q stateTools src/tools/index.ts
 chk "8 pestañas del agente se cierran (tab-reaper)"   grep -q tabReaper http-server.js
 chk "fill_secret y type no esconden el aviso de longitud de la extensión" grep -q "fieldWarning(response.result)" src/tools/interaction.ts
+chk "cada sesión trabaja en su pestaña (session-tabs)" bash -c 'grep -q "sessionTabs.route(" http-server.js && grep -q "targetTabId" src/session-tabs.ts'
 exit $fail
