@@ -1,0 +1,13 @@
+{
+  "id": "new-tab-default",
+  "success": true,
+  "result": {
+    "tab": {
+      "id": 42,
+      "url": "https://example.test/",
+      "title": "Example",
+      "active": false,
+      "connected": true
+    }
+  }
+}
