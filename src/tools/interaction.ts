@@ -49,6 +49,16 @@ export const clickTool: Tool = createTool({
 });
 
 /**
+ * The extension checks the field after typing and reports a length mismatch as `warning`
+ * (lengths only, never the value). Without surfacing it, a type that never reached the page
+ * — a hidden tab, a field that lost focus — came back as a plain success.
+ */
+function fieldWarning(result: unknown): string | undefined {
+  const warning = (result as { warning?: unknown } | undefined)?.warning;
+  return typeof warning === 'string' && warning ? warning : undefined;
+}
+
+/**
  * Type text into an element.
  */
 export const typeTool: Tool = createTool({
@@ -82,7 +92,11 @@ export const typeTool: Tool = createTool({
       return errorResult(response.error?.message ?? 'Type failed');
     }
 
-    return textResult(`Typed "${params.text}" into ${params.ref ?? params.selector}`);
+    const warning = fieldWarning(response.result);
+    const target = params.ref ?? params.selector;
+    return textResult(warning
+      ? `Typed "${params.text}" into ${target}, but ${warning}: check the field before going on`
+      : `Typed "${params.text}" into ${target}`);
   },
 });
 
@@ -413,6 +427,12 @@ export const fillSecretTool: Tool = createTool({
     });
     if (!response.success) {
       return errorResult(response.error?.message ?? 'Fill secret failed');
+    }
+    const warning = fieldWarning(response.result);
+    if (warning) {
+      // An error, not a success with a note: submitting a field that did not get the secret
+      // (a 2FA code above all) burns an attempt.
+      return errorResult(`Did not fill ${params.ref ?? params.selector} as expected: ${warning}. Check the field and fill it again before submitting.`);
     }
     return textResult(`Filled ${params.ref ?? params.selector} with ${params.secretRef} (${value.length} chars)`);
   },
