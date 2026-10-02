@@ -13,6 +13,7 @@ import { createPairingStore } from './src/pairing-store.ts';
 import { patchZipConfig } from './src/extension-zip.ts';
 import { parseLabels, nameOf, resolveTarget, findConnection } from './src/connection-target.ts';
 import { createTabReaper, idleMinutesFromEnv } from './src/tab-reaper.ts';
+import { createSessionTabs } from './src/session-tabs.ts';
 
 const PORT = Number(process.env.MCP_HTTP_PORT || 8000);
 const WS_PORT = Number(process.env.BROWSER_WS_PORT || 8765);
@@ -46,12 +47,17 @@ const tokenStore = getSharedTokenStore();
 const allTools = getAllTools();
 const toolMap = new Map(allTools.map((tool) => [tool.schema.name, tool]));
 
+// Each MCP session works in its own tab, even with several on one browser (src/session-tabs.ts).
+const sessionTabs = createSessionTabs();
+
 // Agent tabs close when their MCP session ends or after this long without use (src/tab-reaper.ts).
 const TAB_IDLE_MINUTES = idleMinutesFromEnv();
 const tabReaper = TAB_IDLE_MINUTES > 0
   ? createTabReaper({
       idleMs: TAB_IDLE_MINUTES * 60_000,
-      send: (connectionId, type, payload) => context.send(type, payload, connectionId),
+      // Through the session queue: a close never lands in the middle of a session's command.
+      send: (connectionId, type, payload) =>
+        sessionTabs.system(context.forConnection(connectionId), connectionId).send(type, payload),
       listConnections: () => context.listConnections(),
     })
   : null;
@@ -148,7 +154,7 @@ async function callTool(name, rawArgs, sessionId) {
   if (!target.ok) return textContent(target.error, true);
   if (target.sticky && sessionId) sessionDefaults.set(sessionId, target.connectionId);
 
-  const bound = context.forConnection(target.connectionId);
+  const bound = sessionTabs.route(context.forConnection(target.connectionId), sessionId, target.connectionId);
   const keepOpenMinutes = typeof args.keepOpenMinutes === 'number' ? args.keepOpenMinutes : undefined;
   return tool.handle(tabReaper ? tabReaper.track(bound, sessionId, target.connectionId, keepOpenMinutes) : bound, args);
 }
@@ -421,6 +427,7 @@ app.post('/mcp', async (req, res) => {
       transport.onclose = () => {
         if (transport.sessionId) {
           void tabReaper?.sessionClosed(transport.sessionId);
+          sessionTabs.sessionClosed(transport.sessionId);
           transports.delete(transport.sessionId);
           servers.delete(transport.sessionId);
           sessionDefaults.delete(transport.sessionId);
