@@ -47,21 +47,23 @@ const tokenStore = getSharedTokenStore();
 const allTools = getAllTools();
 const toolMap = new Map(allTools.map((tool) => [tool.schema.name, tool]));
 
+// Each MCP session works in its own tab, even with several on one browser (src/session-tabs.ts).
+const sessionTabs = createSessionTabs();
+
 // Agent tabs close when their MCP session ends or after this long without use (src/tab-reaper.ts).
 const TAB_IDLE_MINUTES = idleMinutesFromEnv();
 const tabReaper = TAB_IDLE_MINUTES > 0
   ? createTabReaper({
       idleMs: TAB_IDLE_MINUTES * 60_000,
-      send: (connectionId, type, payload) => context.send(type, payload, connectionId),
+      // Through the session queue: a close never lands in the middle of a session's command.
+      send: (connectionId, type, payload) =>
+        sessionTabs.system(context.forConnection(connectionId), connectionId).send(type, payload),
       listConnections: () => context.listConnections(),
     })
   : null;
 if (tabReaper) {
   setInterval(() => void tabReaper.sweep(), 5 * 60_000).unref();
 }
-
-// Each MCP session works in its own tab, even with several on one browser (src/session-tabs.ts).
-const sessionTabs = createSessionTabs();
 
 const pairing = createPairingStore({
   issueToken: (record) =>

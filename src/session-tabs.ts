@@ -11,7 +11,10 @@
  *   - commands to one browser run one at a time, so two sessions never interleave inside a
  *     command (the extension handles messages concurrently);
  *   - a session without a tab of its own may not act while the connected tab is another
- *     session's: it gets an error asking it to open or pick one.
+ *     session's — also one whose session already ended (a payment tab held open for Dani's tap
+ *     with keepOpenMinutes): it gets an error asking it to open or pick one;
+ *   - the server's own calls (the tab reaper closing idle tabs) go through the same queue via
+ *     `system`, and their closes are seen too.
  */
 import type { Context, ExtensionResponse, ToolName } from './types.js';
 import { logger } from './utils/logger.js';
@@ -30,6 +33,8 @@ const NOT_QUEUED = new Set<ToolName>(['browser_wait'] as ToolName[]);
 
 export interface SessionTabs {
   route(context: Context, sessionId: string | undefined, connectionId: string): Context;
+  /** The server's own calls to a browser (tab reaper): queued like the sessions', closes observed. */
+  system(context: Context, connectionId: string): Context;
   sessionClosed(sessionId: string): void;
   /** For tests and diagnostics: the tab a session works in on a browser. */
   tabOf(sessionId: string, connectionId: string): number | undefined;
@@ -50,10 +55,14 @@ export function createSessionTabs(): SessionTabs {
     return result;
   }
 
-  function observe(sessionId: string, connectionId: string, type: ToolName, payload: Record<string, unknown>, response: ExtensionResponse) {
+  function observe(sessionId: string | undefined, connectionId: string, type: ToolName, payload: Record<string, unknown>, response: ExtensionResponse) {
     const result = (response.result ?? {}) as Record<string, unknown>;
     if (!response.success) {
-      if (response.error?.code === 'TAB_GONE') forget(sessionId, connectionId);
+      if (response.error?.code === 'TAB_GONE' && sessionId) forget(sessionId, connectionId);
+      return;
+    }
+    if (!sessionId) {
+      if (type === 'browser_close_tab') closed(connectionId, typeof result.tabId === 'number' ? result.tabId : undefined);
       return;
     }
     if (type === 'browser_new_tab') {
@@ -63,10 +72,15 @@ export function createSessionTabs(): SessionTabs {
     } else if (type === 'browser_switch_tab' && typeof payload.tabId === 'number') {
       adopt(sessionId, connectionId, payload.tabId);
     } else if (type === 'browser_close_tab') {
-      const closed = typeof result.tabId === 'number' ? result.tabId : undefined;
-      for (const [k, tabId] of tabs) if (tabId === closed && k.endsWith(`\u0000${connectionId}`)) tabs.delete(k);
-      if (connected.get(connectionId)?.tabId === closed) connected.delete(connectionId);
+      closed(connectionId, typeof result.tabId === 'number' ? result.tabId : undefined);
     }
+  }
+
+  /** A tab closed on a browser: no session works in it any more. */
+  function closed(connectionId: string, tabId: number | undefined) {
+    if (tabId === undefined) return;
+    for (const [k, t] of [...tabs]) if (t === tabId && k.endsWith(`\u0000${connectionId}`)) tabs.delete(k);
+    if (connected.get(connectionId)?.tabId === tabId) connected.delete(connectionId);
   }
 
   function adopt(sessionId: string, connectionId: string, tabId: number) {
@@ -99,7 +113,7 @@ export function createSessionTabs(): SessionTabs {
                 success: false,
                 error: {
                   code: 'NO_SESSION_TAB',
-                  message: 'This session has no tab of its own on this browser, and the connected tab belongs to another session. Open one with browser_new_tab or pick one with browser_switch_tab.',
+                  message: 'NO_SESSION_TAB: this session has no tab of its own on this browser, and the connected tab belongs to another session. Open one with browser_new_tab or pick one with browser_switch_tab.',
                 },
               };
             }
@@ -117,11 +131,23 @@ export function createSessionTabs(): SessionTabs {
     };
   }
 
+  function system(context: Context, connectionId: string): Context {
+    return {
+      ...context,
+      send: (type, payload = {}, ...rest) => queued(connectionId, async () => {
+        const response = await context.send(type, payload, ...rest);
+        observe(undefined, connectionId, type, payload, response);
+        return response;
+      }),
+    };
+  }
+
   function sessionClosed(sessionId: string) {
     for (const k of [...tabs.keys()]) if (k.startsWith(`${sessionId}\u0000`)) tabs.delete(k);
-    for (const [connectionId, owner] of [...connected]) if (owner.sessionId === sessionId) connected.delete(connectionId);
+    // The connected tab stays this session's until it closes or someone picks it: it may be a
+    // tab held open for Dani (keepOpenMinutes), and a session without a tab must not act in it.
     logger.info(`[session-tabs] session ${sessionId} closed: its tab routing is forgotten`);
   }
 
-  return { route, sessionClosed, tabOf: (s, c) => tabs.get(key(s, c)) };
+  return { route, system, sessionClosed, tabOf: (s, c) => tabs.get(key(s, c)) };
 }

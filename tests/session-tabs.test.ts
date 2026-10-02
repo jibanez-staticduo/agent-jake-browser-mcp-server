@@ -112,14 +112,30 @@ describe('session tabs', () => {
     expect(browser.sent.at(-1)).toEqual({ type: 'browser_wait', payload: { time: 0 } });
   });
 
-  it('forgets everything of a session when it ends', async () => {
+  it('keeps a tab of an ended session off-limits to sessions without a tab until it closes', async () => {
+    // Architect, #20: a payment tab held open for Dani (keepOpenMinutes) outlives its session;
+    // a new session without a tab must not act in it.
     const browser = fakeBrowser();
     const tabs = createSessionTabs();
-    await tabs.route(browser.context, 'A', 'x86').send('browser_new_tab', { url: 'https://a.test' });
+    await tabs.route(browser.context, 'A', 'x86').send('browser_new_tab', { url: 'https://pay.test' }); // 100
     tabs.sessionClosed('A');
     expect(tabs.tabOf('A', 'x86')).toBeUndefined();
-    // the connected tab no longer belongs to anyone: a new session may use the browser
-    const r = await tabs.route(browser.context, 'B', 'x86').send('browser_state', {});
-    expect(r.success).toBe(true);
+
+    const blocked = await tabs.route(browser.context, 'B', 'x86').send('browser_state', {});
+    expect(blocked.error?.code).toBe('NO_SESSION_TAB');
+
+    // the reaper closes it through the same queue, and then the browser is free again
+    await tabs.system(browser.context, 'x86').send('browser_close_tab', { tabId: 100 });
+    const free = await tabs.route(browser.context, 'B', 'x86').send('browser_state', {});
+    expect(free.success).toBe(true);
+  });
+
+  it('queues the server\'s own calls with the sessions\'', async () => {
+    const browser = fakeBrowser();
+    const tabs = createSessionTabs();
+    const a = tabs.route(browser.context, 'A', 'x86');
+    await a.send('browser_new_tab', { url: 'https://a.test' });
+    await Promise.all([a.send('browser_click', {}), tabs.system(browser.context, 'x86').send('browser_list_tabs', {}), a.send('browser_type', { text: 'z' })]);
+    expect(browser.state.maxInFlight).toBe(1);
   });
 });

@@ -25,6 +25,7 @@ Node 22, TypeScript 5.9, tsup 8.5, `@modelcontextprotocol/sdk` ^1.30.1, express 
 - `src/connection-target.ts`: qué navegador recibe cada llamada.
 - `http-server.js`: transporte HTTP streamable (`/mcp`), rutas de pairing y `POST /extension/reload` (solo loopback).
 - `src/tab-reaper.ts`: qué pestañas abrió cada sesión MCP y su cierre al acabar la sesión o por inactividad; lo cablea `http-server.js`.
+- `src/session-tabs.ts`: cada sesión MCP trabaja en su pestaña aunque compartan navegador. Manda `targetTabId` en cada comando, encola los comandos por navegador (también los del reaper, vía `system`) y responde `NO_SESSION_TAB` a una sesión sin pestaña cuando la conectada es de otra; lo cablea `http-server.js`.
 
 ## Cómo se construye
 
@@ -41,6 +42,7 @@ Una herramienta nueva = fichero en `src/tools/` + registro en `src/tools/index.t
 ## Decisiones y trampas
 
 - Los cuatro `deltas` de `check-deltas.sh` son la defensa frente a un auto-update del upstream: nunca se retiran.
+- `session-tabs` necesita la extensión con `routeToTargetTab` (agent-browser-extension#23): **se despliega primero la extensión**, luego esta imagen. Una extensión vieja ignora `targetTabId` y actúa en la pestaña conectada, como antes (no se detecta: nota abierta para anunciarlo en `browser_list_tabs`, como `closeById`). La extensión atiende mensajes en paralelo: la atomicidad de «conectar a la pestaña + ejecutar» la da la cola de aquí.
 - El WebSocket nunca escucha en `0.0.0.0` sin token; el handshake exige token.
 - `browser_fill_secret` lee `op://…` en el servidor: el secreto no pasa por el transcript del agente.
 - Renombrar una herramienta MCP rompe a todas las sesiones: se añade una nueva y se deja la vieja.
