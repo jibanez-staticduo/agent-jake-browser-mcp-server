@@ -73,6 +73,18 @@ export interface TabReaper {
 
 const key = (connectionId: string, tabId: number) => `${connectionId}:${tabId}`;
 
+/**
+ * Tools that manage tabs instead of acting on the page: they use the tab they name by id, never
+ * the connected one. Another session listing or opening tabs is not working in this one.
+ */
+const TAB_MANAGEMENT = new Set<ToolName>([
+  'browser_new_tab',
+  'browser_list_tabs',
+  'browser_switch_tab',
+  'browser_close_tab',
+  'browser_send_to_back',
+]);
+
 function listedTabs(response: ExtensionResponse): ListedTab[] {
   const raw = response.result as ListedTab[] | { tabs?: ListedTab[] } | undefined;
   const tabs = Array.isArray(raw) ? raw : raw?.tabs ?? [];
@@ -174,7 +186,8 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
     return {
       ...context,
       send: async (type, payload = {}, ...rest) => {
-        touch(connectionId, typeof payload.tabId === 'number' ? payload.tabId : currentTab.get(connectionId), sessionId);
+        const named = typeof payload.tabId === 'number' ? payload.tabId : undefined;
+        touch(connectionId, named ?? (TAB_MANAGEMENT.has(type) ? undefined : currentTab.get(connectionId)), sessionId);
         const response = await context.send(type, payload, ...rest);
         observe(sessionId, connectionId, type, payload, response, keepOpenMinutes);
         return response;

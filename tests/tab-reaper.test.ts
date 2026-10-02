@@ -206,6 +206,32 @@ describe('tab reaper', () => {
     expect(browser.tabs.has(100)).toBe(false);
   });
 
+  it('does not count another session listing or opening tabs as use of the connected one', async () => {
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/' }); // 100, connected
+    browser.open = false; // keep it tracked past the end of s1
+    await reaper.sessionClosed('s1');
+
+    await call('s2', 'browser_list_tabs');
+    await call('s2', 'browser_send_to_back');
+    await call('s2', 'browser_new_tab', { url: 'https://other.example/' }); // touches before it opens
+    browser.open = true;
+    await reaper.sweep();
+    expect(browser.tabs.has(100)).toBe(false);
+  });
+
+  it('counts another session acting on the page of the connected tab as use', async () => {
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/' }); // 100, connected
+    browser.open = false;
+    await reaper.sessionClosed('s1');
+
+    await call('s2', 'browser_snapshot'); // works in tab 100: it is s2's now
+    browser.open = true;
+    await reaper.sweep();
+    expect(browser.tabs.has(100)).toBe(true);
+    await reaper.sessionClosed('s2');
+    expect(browser.tabs.has(100)).toBe(false);
+  });
+
   it('closes nothing on a browser whose extension does not close by id', async () => {
     browser.ignoresCloseId = true;
     await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
