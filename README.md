@@ -122,7 +122,8 @@ also works while nothing is connected.
 | `BROWSER_WS_TOKEN` | empty | Shared token required in the handshake (`?token=`). Empty disables static auth. |
 | `BROWSER_ALLOW_PAIRING` | `false` | `true` also accepts tokens issued by the pairing web. Auth is on when this or the static token is set. |
 | `BROWSER_TOKEN_STORE` | `/app/data/tokens.json` | JSON file where issued tokens live, so they survive a restart. Mount a volume for the path. |
-| `BROWSER_EXTENSION_ZIP` | `/app/extension/agent-jake-browser-extension.zip` | Archive served at `/download`. |
+| `BROWSER_EXTENSION_ZIP` | — | Archive served at `/download`; when unset, the published one in `BROWSER_EXTENSION_DIR`, else `/app/extension/agent-jake-browser-extension.zip`. |
+| `BROWSER_EXTENSION_DIR` | `/data/extension` | Where the extension CI publishes `latest.json` and the zip: `GET /download/latest.json`, update check of the installed extensions. |
 | `BROWSER_PUBLIC_WS_URL` | derived | Full `ws(s)://host/path` handed to the extension. Use it when the proxy mapping is not derivable from the request. |
 | `BROWSER_WS_PATH` | `/` | Path advertised to the extension, for proxies that map the socket to a subpath. |
 | `MCP_HTTP_HOST` / `MCP_HTTP_PORT` | `127.0.0.1` / `8000` | MCP streamable HTTP endpoint. |
@@ -154,7 +155,8 @@ can also carry private data, so use these tools only with trusted MCP clients.
 | --- | --- |
 | `POST /mcp` (plus `GET`/`DELETE`) | MCP streamable HTTP endpoint. |
 | `GET /` | Small page with the download link, the pairing link and the live connection list. |
-| `GET /download` | Serves the extension zip from `BROWSER_EXTENSION_ZIP`. |
+| `GET /download` | Serves the extension zip (`BROWSER_EXTENSION_ZIP`, else the published one). |
+| `GET /download/latest.json` | The newest published extension build (`version`, `build`, `sha`, `publishedAt`); 404 when none. Installed extensions check it at startup and every 30 min. |
 | `GET /connections` | JSON: auth status, derived wsUrl and the current connections. |
 | `POST /pair/start` | Extension registers a one-time code (`{otp, connectionId?, label?}`), valid 10 minutes. |
 | `GET /pair` | Approval page, prefilled from `?otp=`. |

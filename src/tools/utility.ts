@@ -44,9 +44,9 @@ export const waitTool: Tool = createTool({
 export const screenshotTool: Tool = createTool({
   name: 'browser_screenshot',
   description:
-    'Take a screenshot of the current page or a specific element. If the tab is ' +
-    'in the background it is briefly brought to the front to capture and then ' +
-    'hidden again, so the user keeps their own view.',
+    'Take a screenshot of the current page or a specific element. A tab in the ' +
+    'background is captured where it is (focus emulation keeps it painting): the ' +
+    "user's visible tab is never moved.",
   schema: z.object({
     ref: z.string().optional().describe('Element reference to screenshot'),
     selector: z.string().optional().describe('CSS selector for element to screenshot'),
