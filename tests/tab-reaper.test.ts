@@ -19,6 +19,8 @@ class FakeBrowser {
   windowMode = false;
   /** Window mode, but the extension answers browser_close_window without saying which tabs it closed. */
   noWindowEcho = false;
+  /** Window mode: the extension echoes only these ids (a partial close), instead of all it was given. */
+  echoOnly: number[] | null = null;
   /** Window mode, but the listing does not announce closeWindow (an extension without it). */
   noCloseWindow = false;
   windowOfTab = new Map<number, number>([[1, 1]]);
@@ -67,7 +69,7 @@ class FakeBrowser {
       case 'browser_close_window': {
         const ids = (payload.tabIds as number[] | undefined) ?? [];
         for (const id of ids) this.tabs.delete(id);
-        return ok(this.noWindowEcho ? { closed: true } : { windowId: payload.windowId, closed: true, closedTabIds: ids });
+        return ok(this.noWindowEcho ? { closed: true } : { windowId: payload.windowId, closed: true, closedTabIds: this.echoOnly ?? ids });
       }
       case 'browser_switch_tab':
         this.connected = payload.tabId as number;
@@ -449,5 +451,41 @@ describe('tab reaper: windows', () => {
     expect(await off.sweep()).toBe(0);
     expect(browser.closes()).toEqual([]);
     expect(browser.windowCloses()).toEqual([]);
+  });
+
+  it('always sends tabIds with browser_close_window: the tracked tabs of that window, never empty', async () => {
+    const first = await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
+    const w1 = (first.result as { windowId: number }).windowId;
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/two', windowId: w1 });
+    await call('s2', 'browser_new_tab', { url: 'https://bank.example/' });
+    await reaper.sessionClosed('s1');
+    clock = HOUR; // s2 goes by idle
+    await reaper.sweep();
+
+    const closes = browser.sent.filter((m) => m.type === 'browser_close_window');
+    expect(closes).toHaveLength(2);
+    for (const m of closes) {
+      expect(Array.isArray(m.payload.tabIds)).toBe(true);
+      expect((m.payload.tabIds as number[]).length).toBeGreaterThan(0);
+      expect(typeof m.payload.windowId).toBe('number');
+    }
+    expect(closes.map((m) => m.payload.tabIds)).toEqual([[100, 101], [102]]);
+  });
+
+  it('a window counts as closed only when closedTabIds covers every tracked tab', async () => {
+    const first = await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
+    const windowId = (first.result as { windowId: number }).windowId;
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/two', windowId });
+
+    browser.echoOnly = [100]; // the extension closed only one of the two
+    await reaper.sessionClosed('s1');
+    expect(reaper.tracked().map((t) => t.tabId).sort()).toEqual([100, 101]); // still tracked, not trusted
+  });
+
+  it('a closedTabIds that covers the tracked tabs (and more) is accepted', async () => {
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
+    browser.echoOnly = [100, 999];
+    await reaper.sessionClosed('s1');
+    expect(reaper.tracked()).toEqual([]);
   });
 });
