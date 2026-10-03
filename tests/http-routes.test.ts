@@ -68,6 +68,7 @@ async function startServer(options: {
   zipPath: string;
   tokenStore: string;
   publicWsUrl?: string;
+  extensionDir?: string;
 }): Promise<RunningServer> {
   const env: Record<string, string> = {
     ...process.env as Record<string, string>,
@@ -78,6 +79,7 @@ async function startServer(options: {
     BROWSER_ALLOW_PAIRING: 'true',
     BROWSER_TOKEN_STORE: options.tokenStore,
     BROWSER_EXTENSION_ZIP: options.zipPath,
+    BROWSER_EXTENSION_DIR: options.extensionDir ?? join(tmpdir(), 'ajb-no-published-extension'),
   };
   delete env.BROWSER_PUBLIC_WS_URL;
   if (options.publicWsUrl) env.BROWSER_PUBLIC_WS_URL = options.publicWsUrl;
@@ -219,11 +221,15 @@ beforeAll(async () => {
   dlZipFile = join(tempDir, 'mount', 'agent-jake-browser-extension.zip');
   writeFileSync(zipFile, templateZipBuffer());
 
+  const extensionDir = join(tempDir, 'published-extension');
+  mkdirSync(extensionDir, { recursive: true });
+  writeFileSync(join(extensionDir, 'latest.json'), JSON.stringify({ version: '2.4.0.119', build: 119, sha: '1e729af', publishedAt: '2026-10-03T10:00:00Z' }));
   primary = await startServer({
     httpPort,
     wsPort,
     zipPath: zipFile,
     tokenStore: tokenStoreFile,
+    extensionDir,
   });
 }, 40000);
 
@@ -436,6 +442,15 @@ describe('agent tabs when the MCP session ends', () => {
     expect([...tabs.keys()].sort()).toEqual([1, 41]);
     extension.socket.close();
   }, 30000);
+});
+
+describe('published extension version', () => {
+  it('serves latest.json for the installed extensions\' update check', async () => {
+    const res = await request(primary, 'GET', '/download/latest.json');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('no-cache');
+    expect(res.json).toEqual({ version: '2.4.0.119', build: 119, sha: '1e729af', publishedAt: '2026-10-03T10:00:00Z', download: '/download' });
+  });
 });
 
 describe('download without BROWSER_PUBLIC_WS_URL', () => {

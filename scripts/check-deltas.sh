@@ -18,4 +18,5 @@ chk "7b browser_state registrado en el server"      grep -q stateTools src/tools
 chk "8 pestañas del agente se cierran (tab-reaper)"   grep -q tabReaper http-server.js
 chk "fill_secret y type no esconden el aviso de longitud de la extensión" grep -q "fieldWarning(response.result)" src/tools/interaction.ts
 chk "cada sesión trabaja en su pestaña (session-tabs)" bash -c 'grep -q "sessionTabs.route(" http-server.js && grep -q "targetTabId" src/session-tabs.ts'
+chk "versión publicada de la extensión en /download/latest.json" bash -c 'grep -q "/download/latest.json" http-server.js && test -f src/published-extension.ts'
 exit $fail

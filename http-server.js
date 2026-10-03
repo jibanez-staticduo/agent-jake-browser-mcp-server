@@ -11,6 +11,7 @@ import { getAllTools } from './src/tools/index.ts';
 import { getSharedTokenStore } from './src/token-store.ts';
 import { createPairingStore } from './src/pairing-store.ts';
 import { patchZipConfig } from './src/extension-zip.ts';
+import { extensionZipPath, readPublishedVersion } from './src/published-extension.ts';
 import { parseLabels, nameOf, resolveTarget, findConnection } from './src/connection-target.ts';
 import { createTabReaper, idleMinutesFromEnv } from './src/tab-reaper.ts';
 import { createSessionTabs } from './src/session-tabs.ts';
@@ -18,8 +19,8 @@ import { createSessionTabs } from './src/session-tabs.ts';
 const PORT = Number(process.env.MCP_HTTP_PORT || 8000);
 const WS_PORT = Number(process.env.BROWSER_WS_PORT || 8765);
 const HTTP_HOST = process.env.MCP_HTTP_HOST || '127.0.0.1';
-const EXTENSION_ZIP =
-  process.env.BROWSER_EXTENSION_ZIP || '/app/extension/agent-jake-browser-extension.zip';
+// What the extension CI published here (src/published-extension.ts): latest.json and its zip.
+const EXTENSION_DIR = process.env.BROWSER_EXTENSION_DIR || '/data/extension';
 const WS_PATH = process.env.BROWSER_WS_PATH || '/';
 
 const CONNECTION_FIELD = {
@@ -270,7 +271,17 @@ function patchedExtensionZip(zipPath, info, wsUrl) {
   return patched.buffer;
 }
 
+// The newest published build, for the installed extensions' update check (startup + every 30 min).
+app.get('/download/latest.json', (_req, res) => {
+  const latest = readPublishedVersion(EXTENSION_DIR);
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  if (!latest) return res.status(404).json({ error: 'no extension build published on this server' });
+  return res.json({ ...latest, download: '/download' });
+});
+
 app.get('/download', async (_req, res) => {
+  const EXTENSION_ZIP = extensionZipPath(process.env, EXTENSION_DIR);
   try {
     const info = await stat(EXTENSION_ZIP);
     const wsUrl = (process.env.BROWSER_PUBLIC_WS_URL || '').trim();
@@ -598,5 +609,5 @@ const PAIR_HTML = `<!doctype html>
 app.listen(PORT, HTTP_HOST, () => {
   console.error(`Agent Jake Browser MCP HTTP endpoint on ${HTTP_HOST}:${PORT}/mcp`);
   console.error(`Agent Jake Browser extension WebSocket on ${process.env.BROWSER_WS_HOST || '127.0.0.1'}:${WS_PORT}`);
-  console.error(`Extension download: ${EXTENSION_ZIP} (served at /download)`);
+  console.error(`Extension download: ${extensionZipPath(process.env, EXTENSION_DIR)} (served at /download, version at /download/latest.json)`);
 });

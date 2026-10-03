@@ -25,6 +25,7 @@ Node 22, TypeScript 5.9, tsup 8.5, `@modelcontextprotocol/sdk` ^1.30.1, express 
 - `src/connection-target.ts`: qué navegador recibe cada llamada.
 - `http-server.js`: transporte HTTP streamable (`/mcp`), rutas de pairing y `POST /extension/reload` (solo loopback).
 - `src/tab-reaper.ts`: qué pestañas abrió cada sesión MCP y su cierre al acabar la sesión o por inactividad; lo cablea `http-server.js`.
+- `src/published-extension.ts`: la extensión que el CI publicó aquí tras un merge a main (`BROWSER_EXTENSION_DIR`, por defecto `/data/extension` en el PVC): `GET /download/latest.json` (versión, build, sha, fecha) para el aviso de versión nueva de las extensiones instaladas, y el zip que sirve `/download`.
 - `src/session-tabs.ts`: cada sesión MCP trabaja en su pestaña aunque compartan navegador. Manda `targetTabId` en cada comando, encola los comandos por navegador (también los del reaper, vía `system`) y responde `NO_SESSION_TAB` a una sesión sin pestaña cuando la conectada es de otra; lo cablea `http-server.js`.
 
 ## Cómo se construye
