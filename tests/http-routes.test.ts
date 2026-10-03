@@ -375,16 +375,18 @@ describe('tools/call through an MCP session', () => {
       connection: 'chrome-http',
     });
     expect(result.isError).toBeUndefined();
-    expect(extension.messages).toHaveLength(1);
-    expect(extension.messages[0]).toMatchObject({
+    // The router asks the browser once (browser_list_tabs) whether it gives sessions windows.
+    const commands = () => extension.messages.filter((m) => m.type !== 'browser_list_tabs');
+    expect(commands()).toHaveLength(1);
+    expect(commands()[0]).toMatchObject({
       type: 'browser_navigate',
       payload: { url: 'https://example.com' },
     });
-    expect(JSON.stringify(extension.messages[0])).not.toContain('connection');
+    expect(JSON.stringify(commands()[0])).not.toContain('connection');
 
     // Without an explicit id the single open connection is targeted.
     await mcpCall('browser_reload', {});
-    expect(extension.messages).toHaveLength(2);
+    expect(commands()).toHaveLength(2);
 
     extension.socket.close();
   }, 30000);

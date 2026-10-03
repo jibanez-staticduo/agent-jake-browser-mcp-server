@@ -1,5 +1,5 @@
 /**
- * Tab management tools: newTab, listTabs, switchTab, closeTab.
+ * Tab management tools: newTab, listTabs, switchTab, claimTab, closeTab.
  */
 import { z } from 'zod';
 import { createTool, textResult, errorResult } from './types.js';
@@ -23,17 +23,17 @@ const KEEP_OPEN_MINUTES = z.number()
 export const newTabTool: Tool = createTool({
   name: 'browser_new_tab',
   description:
-    'Open a URL in a new browser tab and connect to it. The tab opens in the ' +
-    'BACKGROUND so it does not steal the user\'s view; use switchTo: true only ' +
-    'when the user is meant to see it. Tabs you open close by themselves when your ' +
-    'MCP session ends or after 60 minutes without use; keepOpenMinutes holds one open ' +
-    'longer (e.g. a payment screen waiting for a person).',
+    'Open a URL in a new browser tab and connect to it. Each session works in a window of its own, ' +
+    'created in the BACKGROUND (never focused), so it does not steal the user\'s view; the tab is yours ' +
+    'and other sessions get TAB_OWNED if they act in it (they can take it with browser_claim_tab). ' +
+    'Your tabs and window close by themselves when your MCP session ends or after 60 minutes without ' +
+    'use; keepOpenMinutes holds one open longer (e.g. a payment screen waiting for a person).',
   schema: z.object({
     url: z.string().url().describe('URL to open in the new tab'),
     switchTo: z.boolean()
       .optional()
       .default(false)
-      .describe('Bring the new tab to the front after opening it (default: false, stays in background)'),
+      .describe('Deprecated, no effect: nothing is brought to the front. Kept so existing calls still validate.'),
     keepOpenMinutes: KEEP_OPEN_MINUTES,
   }),
   async handle(context, params) {
@@ -103,8 +103,10 @@ export const listTabsTool: Tool = createTool({
 export const switchTabTool: Tool = createTool({
   name: 'browser_switch_tab',
   description:
-    'Switch to a different browser tab by its ID. With keepOpenMinutes, a tab this ' +
-    'session opened stays open that long even after the session ends.',
+    'Make a browser tab this session\'s current one, by its ID. It does not bring the tab to the front ' +
+    'or focus anything: it keeps working in the background. A tab another live session opened answers ' +
+    'TAB_OWNED (use browser_claim_tab). With keepOpenMinutes, a tab this session opened stays open that ' +
+    'long even after the session ends.',
   schema: z.object({
     tabId: z.number().describe('ID of the tab to switch to'),
     keepOpenMinutes: KEEP_OPEN_MINUTES,
@@ -148,9 +150,8 @@ export const claimTabTool: Tool = createTool({
 export const sendToBackTool: Tool = createTool({
   name: 'browser_send_to_back',
   description:
-    'Hide the connected (or given) tab by activating another tab of its window, ' +
-    'giving the user their view back. Use browser_switch_tab to bring a tab to ' +
-    'the front when the user is meant to see it.',
+    'Deprecated, does nothing: tabs are never brought to the front, so there is nothing to hide. ' +
+    'Kept so existing calls still work.',
   schema: z.object({
     tabId: z.number()
       .optional()
