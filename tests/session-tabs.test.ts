@@ -82,7 +82,8 @@ describe('session tabs', () => {
     const tabs = createSessionTabs();
     const r = await tabs.route(browser.context, 'A', 'x86').send('browser_state', {});
     expect(r.success).toBe(true);
-    expect(browser.sent[0].payload).toEqual({});
+    // The router first asks the browser once whether it gives sessions windows; the command goes as it was.
+    expect(browser.sent.find((m) => m.type === 'browser_state')?.payload).toEqual({});
   });
 
   it('forgets a session tab that is gone, and one the session closed', async () => {
@@ -139,3 +140,90 @@ describe('session tabs', () => {
     expect(browser.state.maxInFlight).toBe(1);
   });
 });
+
+describe('session windows', () => {
+  /** An extension with windowPerSession: every new tab says its window; a given live window is reused. */
+  function windowBrowser() {
+    const sent: Array<{ type: ToolName; payload: Record<string, unknown> }> = [];
+    const liveWindows = new Set<number>();
+    let nextWindow = 50;
+    let nextId = 100;
+    const context = {
+      listConnections: () => [{ connectionId: 'x86', connectedAt: 1, open: true }],
+      isConnected: () => true,
+      send: async (type: ToolName, payload: Record<string, unknown> = {}): Promise<ExtensionResponse> => {
+        sent.push({ type, payload });
+        const ok = (result: unknown): ExtensionResponse => ({ id: '', success: true, result });
+        if (type === 'browser_list_tabs') return ok({ tabs: [], closeById: true, closeWindow: true, windowPerSession: true });
+        if (type === 'browser_new_tab') {
+          const asked = payload.windowId as number | undefined;
+          const windowCreated = asked === undefined || !liveWindows.has(asked);
+          const windowId = windowCreated ? nextWindow++ : asked!;
+          liveWindows.add(windowId);
+          const id = nextId++;
+          return ok({ tab: { id, url: String(payload.url), connected: true, windowId }, windowId, windowCreated });
+        }
+        return ok({ ok: true });
+      },
+    } as unknown as Context;
+    return { context, sent, liveWindows };
+  }
+
+  it('opens a session\'s tabs in its own window: injected, and refreshed from the answer', async () => {
+    const b = windowBrowser();
+    const tabs = createSessionTabs();
+    const a = tabs.route(b.context, 'A', 'x86');
+    await a.send('browser_new_tab', { url: 'https://a.test' });
+    expect(tabs.windowOf('A', 'x86')).toBe(50);
+    await a.send('browser_new_tab', { url: 'https://a.test/2' });
+    expect(b.sent.filter((m) => m.type === 'browser_new_tab').map((m) => m.payload.windowId)).toEqual([undefined, 50]);
+    await tabs.route(b.context, 'B', 'x86').send('browser_new_tab', { url: 'https://b.test' });
+    expect(tabs.windowOf('B', 'x86')).toBe(51);
+  });
+
+  it('falls back to a new window when the session\'s window died', async () => {
+    const b = windowBrowser();
+    const tabs = createSessionTabs();
+    const a = tabs.route(b.context, 'A', 'x86');
+    await a.send('browser_new_tab', { url: 'https://a.test' });
+    b.liveWindows.delete(50); // the user closed it
+    await a.send('browser_new_tab', { url: 'https://a.test/2' });
+    expect(tabs.windowOf('A', 'x86')).toBe(51);
+  });
+
+  it('forgets the window when its session ends', async () => {
+    const b = windowBrowser();
+    const tabs = createSessionTabs();
+    await tabs.route(b.context, 'A', 'x86').send('browser_new_tab', { url: 'https://a.test' });
+    tabs.sessionClosed('A');
+    expect(tabs.windowOf('A', 'x86')).toBeUndefined();
+  });
+
+  it('a close_window the reaper made forgets the tabs and the window', async () => {
+    const b = windowBrowser();
+    const tabs = createSessionTabs();
+    await tabs.route(b.context, 'A', 'x86').send('browser_new_tab', { url: 'https://a.test' });
+    const system = tabs.system({ ...b.context, send: async () => ({ id: '', success: true, result: { windowId: 50, closed: true, closedTabIds: [100] } }) } as Context, 'x86');
+    await system.send('browser_close_window', { windowId: 50, tabIds: [100] });
+    expect(tabs.tabOf('A', 'x86')).toBeUndefined();
+    expect(tabs.windowOf('A', 'x86')).toBeUndefined();
+  });
+
+  it('a session that acts without a tab gets one opened first, only on a browser that announces windows', async () => {
+    const b = windowBrowser();
+    const tabs = createSessionTabs();
+    const a = tabs.route(b.context, 'A', 'x86');
+    const r = await a.send('browser_navigate', { url: 'https://a.test' });
+    expect(r.success).toBe(true);
+    const order = b.sent.filter((m) => m.type !== 'browser_list_tabs').map((m) => m.type);
+    expect(order).toEqual(['browser_new_tab', 'browser_navigate']);
+    expect(b.sent.find((m) => m.type === 'browser_new_tab')?.payload).toEqual({ url: 'about:blank' });
+    expect(b.sent.at(-1)?.payload).toEqual({ url: 'https://a.test', targetTabId: 100 });
+    expect(tabs.tabOf('A', 'x86')).toBe(100);
+
+    const old = fakeBrowser(); // extension without windowPerSession: nothing is opened for the session
+    await createSessionTabs().route(old.context, 'A', 'x86').send('browser_state', {});
+    expect(old.sent.map((m) => m.type)).not.toContain('browser_new_tab');
+  });
+});
+

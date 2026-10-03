@@ -11,6 +11,11 @@
  * `keepOpenMinutes` on browser_new_tab / browser_switch_tab holds it open until then, for a
  * tab that waits on a person (a payment ready for Dani's tap) after its session is gone.
  *
+ * On a browser that gives each session a window of its own (`closeWindow` in the listing), a
+ * window whose tracked tabs are all due closes in one piece with `browser_close_window`; one
+ * that also holds a tab we did not open, or a tab still wanted (keepOpenMinutes), loses only the
+ * due tabs.
+ *
  * Chrome reuses tab ids after a restart, so a tab is closed only after the browser lists it
  * with the URL last seen for it: across a reconnection a different URL under the same id is
  * someone else's tab, and the entry is dropped instead.
@@ -32,6 +37,8 @@ interface TrackedTab {
   lastUsed: number;
   keepUntil: number;
   url: string;
+  /** Window the tab lives in, when the extension says (agent-browser-extension windowPerSession). */
+  windowId?: number;
   /** connectedAt of the browser connection when `url` was last observed. */
   connectedAt: number;
   sessionClosed: boolean;
@@ -40,6 +47,7 @@ interface TrackedTab {
 interface ListedTab {
   id: number;
   url: string;
+  windowId?: number;
 }
 
 export interface TabReaperOptions {
@@ -102,6 +110,12 @@ function listedTabs(response: ExtensionResponse): ListedTab[] {
   return tabs.filter((t) => typeof t?.id === 'number');
 }
 
+/** Only extension builds that close agent windows say so in their listing. */
+function closesWindows(response: ExtensionResponse): boolean {
+  const raw = response.result as { closeWindow?: unknown } | undefined;
+  return !Array.isArray(raw) && raw?.closeWindow === true;
+}
+
 /** Only extension builds that close the tab they are asked for say so in their listing. */
 function closesById(response: ExtensionResponse): boolean {
   const raw = response.result as { closeById?: unknown } | undefined;
@@ -132,7 +146,7 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
     }
   }
 
-  function adopt(sessionId: string, connectionId: string, tabId: number, url: string) {
+  function adopt(sessionId: string, connectionId: string, tabId: number, url: string, windowId?: number) {
     if (tabs.has(key(connectionId, tabId))) return;
     tabs.set(key(connectionId, tabId), {
       connectionId,
@@ -141,6 +155,7 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
       lastUsed: now(),
       keepUntil: 0,
       url,
+      ...(typeof windowId === 'number' ? { windowId } : {}),
       connectedAt: connectedAtOf(connectionId),
       sessionClosed: false,
     });
@@ -160,17 +175,17 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
 
     if (type === 'browser_new_tab') {
       // The extension answers { tab: { id, url, connected } }; older builds answered { tabId }.
-      const tab = (result.tab ?? {}) as { id?: number; url?: string; connected?: boolean };
+      const tab = (result.tab ?? {}) as { id?: number; url?: string; connected?: boolean; windowId?: number };
       const tabId = tab.id ?? (result.tabId as number | undefined);
       if (typeof tabId !== 'number') return;
-      adopt(sessionId, connectionId, tabId, tab.url || String(payload.url ?? ''));
+      adopt(sessionId, connectionId, tabId, tab.url || String(payload.url ?? ''), tab.windowId ?? (result.windowId as number | undefined));
       if (tab.connected !== false) currentTab.set(connectionId, tabId);
       if (keepOpenMinutes !== undefined) keep(connectionId, tabId, keepOpenMinutes);
       return;
     }
 
-    const opened = result.newTabOpened as { id?: number; url?: string } | undefined;
-    if (typeof opened?.id === 'number') adopt(sessionId, connectionId, opened.id, opened.url ?? '');
+    const opened = result.newTabOpened as { id?: number; url?: string; windowId?: number } | undefined;
+    if (typeof opened?.id === 'number') adopt(sessionId, connectionId, opened.id, opened.url ?? '', opened.windowId);
 
     if (type === 'browser_switch_tab' && typeof payload.tabId === 'number') {
       currentTab.set(connectionId, payload.tabId);
@@ -248,34 +263,94 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
     return true;
   }
 
+  /**
+   * Close a window whose tracked tabs are all due, with one browser_close_window. The extension
+   * answers the tabs it closed; anything short of all of ours means it does not do what we asked.
+   */
+  async function closeWindow(connectionId: string, windowId: number, group: TrackedTab[]): Promise<boolean> {
+    const ids = group.map((tab) => tab.tabId);
+    const answer = await options.send(connectionId, 'browser_close_window', { windowId, tabIds: ids }).catch(
+      (error: Error) => ({ success: false, error: { code: 'SEND_FAILED', message: error.message } }) as ExtensionResponse,
+    );
+    if (!answer.success) {
+      logger.warn(`[tab-reaper] could not close window ${windowId} on ${connectionId}: ${answer.error?.message}`);
+      return false;
+    }
+    const echoed = (answer.result as { closedTabIds?: unknown } | undefined)?.closedTabIds;
+    if (!Array.isArray(echoed) || !ids.every((id) => echoed.includes(id))) {
+      unsafe.add(connectionId);
+      logger.error(
+        `[tab-reaper] asked ${connectionId} to close window ${windowId} (tabs ${ids.join(',')}) and it answered ${JSON.stringify(answer.result)}: ` +
+          'no more closing on that browser',
+      );
+      return false;
+    }
+    logger.info(`[tab-reaper] closed window ${windowId} on ${connectionId} (tabs ${ids.join(',')}; session ${group[0]?.sessionId})`);
+    return true;
+  }
+
   async function sweepConnection(connection: BrowserConnectionInfo, mine: TrackedTab[], t: number): Promise<number> {
     const listing = await options.send(connection.connectionId, 'browser_list_tabs');
     if (!listing.success) return 0;
-    const open = new Map(listedTabs(listing).map((tab) => [tab.id, tab.url ?? '']));
+    const listed = listedTabs(listing);
+    const open = new Map(listed.map((tab) => [tab.id, tab.url ?? '']));
     const announced = closesById(listing);
+    const windowsAnnounced = closesWindows(listing);
     let closed = 0;
+    const forgetTab = (tab: TrackedTab) => {
+      tabs.delete(key(tab.connectionId, tab.tabId));
+      if (currentTab.get(tab.connectionId) === tab.tabId) currentTab.delete(tab.connectionId);
+    };
 
+    const due: TrackedTab[] = [];
+    const staying: TrackedTab[] = [];
     for (const tab of mine) {
       const url = open.get(tab.tabId);
-      const forget = () => {
-        tabs.delete(key(tab.connectionId, tab.tabId));
-        if (currentTab.get(tab.connectionId) === tab.tabId) currentTab.delete(tab.connectionId);
-      };
       if (url === undefined) {
-        forget(); // already gone
-      } else if (tab.connectedAt !== connection.connectedAt && url !== tab.url) {
+        forgetTab(tab); // already gone
+        continue;
+      }
+      const windowId = listed.find((l) => l.id === tab.tabId)?.windowId;
+      if (typeof windowId === 'number') tab.windowId = windowId;
+      if (tab.connectedAt !== connection.connectedAt && url !== tab.url) {
         // The browser reconnected and that id now shows another page: maybe not our tab.
         logger.warn(`[tab-reaper] tab ${tab.tabId} on ${tab.connectionId} changed across a reconnection; no longer tracked`);
-        forget();
+        forgetTab(tab);
       } else if (isDue(tab, t)) {
-        // Stays tracked: it closes once the browser runs a build that can.
-        if (!announced || unsafe.has(tab.connectionId)) continue;
-        if (await closeTab(tab)) closed++;
-        forget();
+        due.push(tab);
       } else {
         tab.url = url;
         tab.connectedAt = connection.connectedAt;
+        staying.push(tab);
       }
+    }
+    // Stays tracked: it closes once the browser runs a build that can.
+    if (!announced || unsafe.has(connection.connectionId)) return closed;
+
+    // A window goes in one piece when every tab we track in it is due and it holds nothing else.
+    const byWindow = new Map<number, TrackedTab[]>();
+    if (windowsAnnounced) {
+      for (const tab of due) if (tab.windowId !== undefined) byWindow.set(tab.windowId, [...(byWindow.get(tab.windowId) ?? []), tab]);
+    }
+    const trackedIds = new Set(mine.map((tab) => tab.tabId));
+    const done = new Set<TrackedTab>();
+    for (const [windowId, group] of byWindow) {
+      const blocked = staying.some((tab) => tab.windowId === windowId) ||
+        listed.some((l) => l.windowId === windowId && !trackedIds.has(l.id));
+      if (blocked || unsafe.has(connection.connectionId)) continue;
+      if (await closeWindow(connection.connectionId, windowId, group)) {
+        closed += group.length;
+        for (const tab of group) {
+          forgetTab(tab);
+          done.add(tab);
+        }
+      }
+    }
+
+    for (const tab of due) {
+      if (done.has(tab) || unsafe.has(connection.connectionId)) continue;
+      if (await closeTab(tab)) closed++;
+      forgetTab(tab);
     }
     return closed;
   }

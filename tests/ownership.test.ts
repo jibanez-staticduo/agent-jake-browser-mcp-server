@@ -122,4 +122,25 @@ describe('tab ownership', () => {
     const r = await claimTabTool.handle(t.browser, { tabId: 100 });
     expect(r.isError).toBe(true);
   });
+
+  it('lazy session: with windowPerSession a tab is opened before the command, and it is the session\'s own', async () => {
+    const t = setup({ windowPerSession: true });
+    const r = await t.as(A).send('browser_navigate', { url: 'https://a.test' });
+    expect(r.success).toBe(true);
+    const types = t.sent.filter((m) => m.type !== 'browser_list_tabs').map((m) => m.type);
+    expect(types).toEqual(['browser_new_tab', 'browser_navigate']);
+    expect(t.reaper.ownerOf('x86', 100)).toEqual({ sessionId: A, sessionClosed: false });
+    expect(t.sent.at(-1)?.payload).toMatchObject({ targetTabId: 100 });
+    // B is refused in A's tab and gets its own, not the user's tab 1.
+    expect((await t.as(B, 100).send('browser_click', {})).error?.code).toBe('TAB_OWNED');
+    await t.as(B).send('browser_click', {});
+    expect(t.sent.at(-1)?.payload).toMatchObject({ targetTabId: 101 });
+  });
+
+  it('old extension (no windowPerSession): no tab is opened for the session, as today', async () => {
+    const t = setup();
+    await t.as(A).send('browser_navigate', { url: 'https://a.test' });
+    expect(t.sent.map((m) => m.type)).not.toContain('browser_new_tab');
+    expect(t.sent.at(-1)?.payload).toEqual({ url: 'https://a.test' });
+  });
 });
