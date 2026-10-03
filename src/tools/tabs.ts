@@ -123,6 +123,26 @@ export const switchTabTool: Tool = createTool({
 });
 
 /**
+ * Take over a tab another session opened. Answered by the server (src/session-tabs.ts): the next
+ * command already carries the tab as its target, so the extension has nothing to do.
+ */
+export const claimTabTool: Tool = createTool({
+  name: 'browser_claim_tab',
+  description:
+    'Take over a tab that another session opened, after a command on it answered TAB_OWNED. ' +
+    'The tab becomes yours and your session\'s current tab; the previous owner gets TAB_OWNED if it keeps using it. ' +
+    'Tabs nobody opened (the user\'s own) cannot be claimed: adopt them with browser_switch_tab.',
+  schema: z.object({
+    tabId: z.number().describe('ID of the tab to take over (see browser_list_tabs)'),
+  }),
+  async handle(context, params) {
+    if (!context.claimTab) return errorResult('browser_claim_tab needs an MCP session over the HTTP transport.');
+    const claimed = context.claimTab(params.tabId);
+    return claimed.ok ? textResult(`Tab ${params.tabId} is now yours`) : errorResult(claimed.message);
+  },
+});
+
+/**
  * Send a tab to the background.
  */
 export const sendToBackTool: Tool = createTool({
@@ -177,6 +197,7 @@ export const tabTools: Tool[] = [
   newTabTool,
   listTabsTool,
   switchTabTool,
+  claimTabTool,
   sendToBackTool,
   closeTabTool,
 ];

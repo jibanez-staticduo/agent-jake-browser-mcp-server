@@ -43,6 +43,7 @@ interface ListedTab {
 }
 
 export interface TabReaperOptions {
+  /** Minutes without use before a tab closes. 0 turns closing off; ownership is still tracked. */
   idleMs: number;
   /** Raw access to the extension: send to one connection, list the connections. */
   send(connectionId: string, type: ToolName, payload?: Record<string, unknown>): Promise<ExtensionResponse>;
@@ -69,6 +70,16 @@ export interface TabReaper {
   /** Close every tab that is due. Returns how many it closed. */
   sweep(): Promise<number>;
   tracked(): ReadonlyArray<Readonly<TrackedTab>>;
+  /** Single source of tab ownership: who opened (or claimed) this tab, undefined for tabs it never saw. */
+  ownerOf(connectionId: string, tabId: number): TabOwner | undefined;
+  /** Hand a tracked tab to `sessionId` (browser_claim_tab). False when the tab is not tracked. */
+  claim(connectionId: string, tabId: number, sessionId: string): boolean;
+}
+
+export interface TabOwner {
+  sessionId: string;
+  /** Its session ended: another session may take the tab over, as with a held payment tab. */
+  sessionClosed: boolean;
 }
 
 const key = (connectionId: string, tabId: number) => `${connectionId}:${tabId}`;
@@ -186,7 +197,9 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
     return {
       ...context,
       send: async (type, payload = {}, ...rest) => {
-        const named = typeof payload.tabId === 'number' ? payload.tabId : undefined;
+        const named = typeof payload.tabId === 'number'
+          ? payload.tabId
+          : typeof payload.targetTabId === 'number' ? payload.targetTabId : undefined;
         touch(connectionId, named ?? (TAB_MANAGEMENT.has(type) ? undefined : currentTab.get(connectionId)), sessionId);
         const response = await context.send(type, payload, ...rest);
         observe(sessionId, connectionId, type, payload, response, keepOpenMinutes);
@@ -268,6 +281,7 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
   }
 
   async function runSweep(): Promise<number> {
+    if (options.idleMs <= 0) return 0; // closing is off; the registry still serves ownership
     const t = now();
     let closed = 0;
     for (const connection of options.listConnections()) {
@@ -301,6 +315,21 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
     if (any) await sweep();
   }
 
+  function ownerOf(connectionId: string, tabId: number): TabOwner | undefined {
+    const tab = tabs.get(key(connectionId, tabId));
+    return tab ? { sessionId: tab.sessionId, sessionClosed: tab.sessionClosed } : undefined;
+  }
+
+  function claim(connectionId: string, tabId: number, sessionId: string): boolean {
+    const tab = tabs.get(key(connectionId, tabId));
+    if (!tab) return false;
+    tab.sessionId = sessionId;
+    tab.sessionClosed = false;
+    tab.lastUsed = now();
+    logger.info(`[tab-reaper] tab ${tabId} on ${connectionId} claimed by session ${sessionId}`);
+    return true;
+  }
+
   return {
     track,
     touchSession,
@@ -308,6 +337,8 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
     sessionClosed,
     sweep,
     tracked: () => [...tabs.values()],
+    ownerOf,
+    claim,
   };
 }
 

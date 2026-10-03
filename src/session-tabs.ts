@@ -14,7 +14,12 @@
  *     session's — also one whose session already ended (a payment tab held open for Dani's tap
  *     with keepOpenMinutes): it gets an error asking it to open or pick one;
  *   - the server's own calls (the tab reaper closing idle tabs) go through the same queue via
- *     `system`, and their closes are seen too.
+ *     `system`, and their closes are seen too;
+ *   - a tab belongs to the session that opened it, as the tab reaper records it (the single source
+ *     of ownership: this file keeps none). Acting on another live session's tab — by its own
+ *     `tabId`, or by a switch/close/send-to-back that names it — answers TAB_OWNED without
+ *     sending anything; browser_claim_tab hands the tab over. Tabs nobody opened (the user's) and
+ *     tabs whose session ended stay adoptable.
  */
 import type { Context, ExtensionResponse, ToolName } from './types.js';
 import { logger } from './utils/logger.js';
@@ -31,8 +36,27 @@ const NOT_ROUTED = new Set<ToolName>([
 /** Commands that do not use the tab and need not wait for the browser's queue. */
 const NOT_QUEUED = new Set<ToolName>(['browser_wait'] as ToolName[]);
 
+/** Tab ownership, served by the tab reaper (src/tab-reaper.ts). */
+export interface TabOwnership {
+  ownerOf(connectionId: string, tabId: number): { sessionId: string; sessionClosed: boolean } | undefined;
+  claim(connectionId: string, tabId: number, sessionId: string): boolean;
+}
+
+/** Tab-management commands name their own tab in `tabId`; the others take it as an explicit target. */
+const NAMES_TAB = new Set<ToolName>(['browser_switch_tab', 'browser_close_tab', 'browser_send_to_back'] as ToolName[]);
+
+/** Whether a command may carry an explicit `tabId` that is not part of its own arguments. */
+export function acceptsExplicitTab(type: string): boolean {
+  return !NOT_ROUTED.has(type as ToolName) && !NAMES_TAB.has(type as ToolName) && type !== 'browser_claim_tab';
+}
+
+export interface RouteOptions {
+  /** `tabId` the caller asked for on a command that does not have one of its own. */
+  explicitTabId?: number;
+}
+
 export interface SessionTabs {
-  route(context: Context, sessionId: string | undefined, connectionId: string): Context;
+  route(context: Context, sessionId: string | undefined, connectionId: string, options?: RouteOptions): Context;
   /** The server's own calls to a browser (tab reaper): queued like the sessions', closes observed. */
   system(context: Context, connectionId: string): Context;
   sessionClosed(sessionId: string): void;
@@ -42,7 +66,9 @@ export interface SessionTabs {
 
 const key = (sessionId: string, connectionId: string) => `${sessionId}\u0000${connectionId}`;
 
-export function createSessionTabs(): SessionTabs {
+const short = (sessionId: string) => sessionId.slice(0, 8);
+
+export function createSessionTabs(ownership?: TabOwnership): SessionTabs {
   const tabs = new Map<string, number>();
   /** What the extension of each browser is connected to, as far as this server routed it. */
   const connected = new Map<string, { tabId: number; sessionId: string }>();
@@ -94,14 +120,64 @@ export function createSessionTabs(): SessionTabs {
     if (tabId !== undefined && connected.get(connectionId)?.tabId === tabId) connected.delete(connectionId);
   }
 
-  function route(context: Context, sessionId: string | undefined, connectionId: string): Context {
+  /** TAB_OWNED when the tab belongs to another live session; undefined when this one may act in it. */
+  function ownedByOther(sessionId: string, connectionId: string, tabId: number): ExtensionResponse | undefined {
+    const owner = ownership?.ownerOf(connectionId, tabId);
+    if (!owner || owner.sessionId === sessionId || owner.sessionClosed) return undefined;
+    return {
+      id: '',
+      success: false,
+      error: {
+        code: 'TAB_OWNED',
+        message:
+          `TAB_OWNED: la pestaña ${tabId} es de la sesión ${short(owner.sessionId)} ` +
+          `(tab ${tabId} belongs to session ${short(owner.sessionId)}); toma el control con browser_claim_tab`,
+      },
+    };
+  }
+
+  function claimTab(sessionId: string | undefined, connectionId: string, tabId: number): ReturnType<NonNullable<Context['claimTab']>> {
+    if (!sessionId || !ownership) return { ok: false, message: 'browser_claim_tab needs an MCP session over the HTTP transport.' };
+    const owner = ownership.ownerOf(connectionId, tabId);
+    if (!owner) {
+      return {
+        ok: false,
+        message:
+          `Tab ${tabId} is not one an agent opened (it may be the user's own), so there is nothing to claim: ` +
+          'adopt it with browser_switch_tab.',
+      };
+    }
+    if (owner.sessionId !== sessionId) {
+      ownership.claim(connectionId, tabId, sessionId);
+      // The session that had it no longer works in it.
+      for (const [k, t] of [...tabs]) if (t === tabId && k.endsWith(`\u0000${connectionId}`) && !k.startsWith(`${sessionId}\u0000`)) tabs.delete(k);
+    }
+    adopt(sessionId, connectionId, tabId);
+    return { ok: true };
+  }
+
+  function route(context: Context, sessionId: string | undefined, connectionId: string, options: RouteOptions = {}): Context {
     return {
       ...context,
+      claimTab: (tabId) => claimTab(sessionId, connectionId, tabId),
       send: (type, payload = {}, ...rest) => {
         const run = async (): Promise<ExtensionResponse> => {
+          if (sessionId) {
+            const named = NAMES_TAB.has(type) && typeof payload.tabId === 'number' ? payload.tabId : options.explicitTabId;
+            const target = named ?? (NOT_ROUTED.has(type) ? undefined : tabs.get(key(sessionId, connectionId)));
+            const refused = target === undefined ? undefined : ownedByOther(sessionId, connectionId, target);
+            if (refused) return refused;
+          }
           if (!sessionId || NOT_ROUTED.has(type)) {
             const response = await context.send(type, payload, ...rest);
             if (sessionId) observe(sessionId, connectionId, type, payload, response);
+            return response;
+          }
+          const explicit = acceptsExplicitTab(type) ? options.explicitTabId : undefined;
+          if (explicit !== undefined) {
+            // An explicit target is sent as it is: it does not become the session's tab.
+            const response = await context.send(type, { ...payload, targetTabId: explicit }, ...rest);
+            observe(sessionId, connectionId, type, payload, response);
             return response;
           }
           const mine = tabs.get(key(sessionId, connectionId));
