@@ -56,6 +56,43 @@ describe('browser_fill_secret', () => {
     expect(sent).toEqual([]);
   });
 
+  it('does not expose reader stderr when a configured wrapper fails', async () => {
+    await fakeOp(`printf '%s\\n' '${SECRET}' >&2; exit 1`);
+    const { context, sent } = fakeContext();
+    const r = await tool.handle(context, { ref: 'e5', secretRef: 'op://Private/item/password' });
+    expect(r.isError).toBe(true);
+    expect(JSON.stringify(r)).not.toContain(SECRET);
+    expect(sent).toEqual([]);
+  });
+
+  it('does not expose a typed secret from extension error or warning text', async () => {
+    await fakeOp(`printf '%s\\n' '${SECRET}'`);
+    const { context } = fakeContext({ warning: `Field value was ${SECRET}` });
+    const warningResult = await tool.handle(context, { ref: 'e5', secretRef: 'op://Private/item/password' });
+    expect(warningResult.isError).toBe(true);
+    expect(JSON.stringify(warningResult)).not.toContain(SECRET);
+
+    const failingContext = {
+      ...context,
+      send: async () => ({ id: 'x', success: false, error: { message: `Typing ${SECRET} failed` } }),
+    } as Context;
+    const errorResult = await tool.handle(failingContext, { ref: 'e5', secretRef: 'op://Private/item/password' });
+    expect(errorResult.isError).toBe(true);
+    expect(JSON.stringify(errorResult)).not.toContain(SECRET);
+  });
+
+  it('handles a transport rejection without reflecting its message or typed value', async () => {
+    await fakeOp(`printf '%s\\n' '${SECRET}'`);
+    const { context } = fakeContext();
+    const rejectingContext = {
+      ...context,
+      send: async () => { throw new Error(`Could not send ${SECRET}`); },
+    } as Context;
+    const r = await tool.handle(rejectingContext, { ref: 'e5', secretRef: 'op://Private/item/password' });
+    expect(r.isError).toBe(true);
+    expect(JSON.stringify(r)).not.toContain(SECRET);
+  });
+
   it('is an error when the extension reports the field did not end up with the secret', async () => {
     // Regression: a hidden tab got none of the keys and the tool still said "Filled (6 chars)".
     await fakeOp(`printf '%s\\n' '${SECRET}'`);
@@ -63,8 +100,25 @@ describe('browser_fill_secret', () => {
     const r = await tool.handle(context, { selector: '#otp', secretRef: 'op://Private/item/password' });
     expect(r.isError).toBe(true);
     const out = JSON.stringify(r);
-    expect(out).toContain('the field holds 0 characters after typing 19');
+    expect(out).toContain('Did not fill #otp as expected');
     expect(out).not.toContain(SECRET);
+  });
+
+  it.each(['op://', 'op://vault/item', 'op://vault//field', 'op://vault/item/field#fragment', 'op://vault/item/fi\neld'])('rejects malformed secret reference %j before reading', async secretRef => {
+    await fakeOp('exit 0');
+    const { context, sent } = fakeContext();
+    const r = await tool.handle(context, { ref: 'e5', secretRef });
+    expect(r.isError).toBe(true);
+    expect(JSON.stringify(r)).toContain('Invalid parameters');
+    expect(sent).toEqual([]);
+  });
+
+  it.each(['op://vault/item/field', 'op://vault/item/section/field', 'op://My Vault/My Item/one-time password?attribute=otp'])('keeps complete reference %j as one reader argument', async secretRef => {
+    await fakeOp(`printf '%s\\n' '${SECRET}'`);
+    const { context } = fakeContext();
+    const r = await tool.handle(context, { ref: 'e5', secretRef });
+    expect(r.isError).not.toBe(true);
+    expect(JSON.stringify(r)).not.toContain(SECRET);
   });
 });
 
@@ -89,6 +143,17 @@ describe('browser_fill_secret backend (AGENT_BROWSER_OP_BACKEND)', () => {
     await fakeOp(reportEnv);
     Object.assign(process.env, { AGENT_BROWSER_OP_BACKEND: 'service-account', OP_SERVICE_ACCOUNT_TOKEN: 'ops_x', OP_CONNECT_HOST: 'http://connect:8080', OP_CONNECT_TOKEN: 'tok' });
     expect(await readSecret('op://v/i/f')).toBe('sa=1 host= token=0');
+  });
+
+  it.each([undefined, '', ' \n '])('service-account rejects a missing or blank token instead of using another login', async token => {
+    await fakeOp(reportEnv);
+    process.env.AGENT_BROWSER_OP_BACKEND = 'service-account';
+    if (token === undefined) delete process.env.OP_SERVICE_ACCOUNT_TOKEN;
+    else process.env.OP_SERVICE_ACCOUNT_TOKEN = token;
+    const { context, sent } = fakeContext();
+    const r = await tool.handle(context, { ref: 'e5', secretRef: 'op://v/i/f' });
+    expect(r.isError).toBe(true);
+    expect(sent).toEqual([]);
   });
 
   it('unset: passes the environment as it is', async () => {
