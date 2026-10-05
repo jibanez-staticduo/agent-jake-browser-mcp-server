@@ -13,10 +13,10 @@ RUN npm run build
 # 1Password CLI for browser_fill_secret (see README, 1Password).
 FROM alpine:3.22 AS opcli
 ARG OP_VERSION=2.39.0
-ARG TARGETARCH=amd64
+ARG TARGETARCH
+COPY scripts/install-op.sh /tmp/install-op.sh
 RUN apk add --no-cache curl unzip \
-  && curl -fsSLo /tmp/op.zip "https://cache.agilebits.com/dist/1P/op2/pkg/v${OP_VERSION}/op_linux_${TARGETARCH}_v${OP_VERSION}.zip" \
-  && unzip -q /tmp/op.zip op -d /usr/local/bin && chmod 0755 /usr/local/bin/op
+  && sh /tmp/install-op.sh "$OP_VERSION" "$TARGETARCH" /usr/local/bin
 
 FROM node:22-alpine
 

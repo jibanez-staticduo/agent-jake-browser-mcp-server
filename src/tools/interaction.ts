@@ -9,7 +9,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { openPinnedDirectory, pinnedChildPath } from './pinned-directory.js';
 import { createTool, textResult, errorResult } from './types.js';
-import type { Tool } from '../types.js';
+import type { Tool, ExtensionResponse } from '../types.js';
 
 /**
  * Click on an element.
@@ -369,12 +369,11 @@ export const fillFormTool: Tool = createTool({
 });
 
 /**
- * The extension may check the field after typing and report a length mismatch as `warning`
- * (lengths only, never the value). An extension that does not report it leaves this undefined.
+ * Treat extension warnings as failure signals, never as safe text to return to the caller.
  */
-function fieldWarning(result: unknown): string | undefined {
+function hasFieldWarning(result: unknown): boolean {
   const warning = (result as { warning?: unknown } | undefined)?.warning;
-  return typeof warning === 'string' && warning ? warning : undefined;
+  return typeof warning === 'string' && warning.length > 0;
 }
 
 /**
@@ -401,6 +400,9 @@ export function opEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
     return out;
   }
   if (backend === 'service-account') {
+    if (!env.OP_SERVICE_ACCOUNT_TOKEN?.trim()) {
+      throw new Error('AGENT_BROWSER_OP_BACKEND=service-account needs OP_SERVICE_ACCOUNT_TOKEN');
+    }
     delete out.OP_CONNECT_HOST;
     delete out.OP_CONNECT_TOKEN;
     return out;
@@ -421,16 +423,20 @@ export async function readSecret(ref: string): Promise<string> {
 
 /**
  * Type a secret from 1Password into a field. The value never reaches the model: it is not in
- * the tool arguments, the result, or the server log, and it is sent to the extension flagged
- * `secret` so an extension that logs payloads can redact it.
+ * the tool arguments or the result. A compatible extension must honor `secret` and redact
+ * both request and response logs; older extensions are not safe for this operation.
  */
 export const fillSecretTool: Tool = createTool({
   name: 'browser_fill_secret',
-  description: 'Type a secret from 1Password (op://vault/item/field) into a field. The value is read on the server machine and never appears in arguments, results or logs. Use it for passwords AND for 2FA/TOTP codes, never browser_type. TOTP: reference the OTP field of the item BY ITS FIELD ID with ?attribute=otp (op://vault/item/TOTP_xxxx?attribute=otp) and it types the current code; the field label changes with the app language. Without ?attribute=otp it would type the otpauth:// seed.',
+  description: 'Type a secret from 1Password (op://vault/item/field) into a field. The value is read on the server and omitted from this tool result. Requires a secret-aware extension that redacts request and response logs. Use it for passwords AND for 2FA/TOTP codes, never browser_type. TOTP: reference the OTP field of the item BY ITS FIELD ID with ?attribute=otp (op://vault/item/TOTP_xxxx?attribute=otp) and it types the current code; the field label changes with the app language. Without ?attribute=otp it would type the otpauth:// seed.',
   schema: z.object({
     ref: z.string().optional().describe('Element reference from browser_state/snapshot'),
     selector: z.string().optional().describe('CSS selector to find the element'),
-    secretRef: z.string().regex(/^op:\/\//, 'secretRef must be an op:// reference').describe('1Password secret reference, op://vault/item/field. TOTP code: op://vault/item/<OTP field id>?attribute=otp'),
+    secretRef: z.string()
+      .regex(/^op:\/\/[^/?#]+\/[^/?#]+\/(?:[^/?#]+\/)?[^/?#]+(?:\?[^#]+)?$/, 'secretRef must be a complete op://vault/item/field reference')
+      .regex(/^[^\x00-\x1f\x7f]+$/, 'secretRef must not contain control characters')
+      .refine(ref => ref.slice(5).split('?')[0].split('/').every(part => part.trim().length > 0), 'secretRef components must not be blank')
+      .describe('1Password secret reference, op://vault/item/field. TOTP code: op://vault/item/<OTP field id>?attribute=otp'),
     clear: z.boolean().optional().default(true).describe('Clear existing text before typing'),
   }).refine(
     data => data.ref || data.selector,
@@ -440,28 +446,30 @@ export const fillSecretTool: Tool = createTool({
     let value: string;
     try {
       value = await readSecret(params.secretRef);
-    } catch (err) {
-      // stderr, exit code or our own message only: op never prints the secret there.
-      const e = err as { code?: string | number; stderr?: string; message?: string };
-      const why = [e.code, (e.stderr ?? '').trim().slice(0, 300)].filter(Boolean).join(': ') || (e.message ?? '');
-      return errorResult(`Could not read ${params.secretRef}${why ? ` (${why})` : ''}. Is 1Password reachable from the server?`);
+    } catch {
+      // A configurable reader may put secrets in stderr or its exception message.
+      return errorResult(`Could not read ${params.secretRef}. Check the configured 1Password reader, credentials and AGENT_BROWSER_OP_BACKEND on the server.`);
     }
     if (!value) return errorResult(`Empty secret at ${params.secretRef}`);
-    const response = await context.send('browser_type', {
-      ref: params.ref,
-      selector: params.selector,
-      text: value,
-      clear: params.clear,
-      secret: true,
-    });
-    if (!response.success) {
-      return errorResult(response.error?.message ?? 'Fill secret failed');
+    let response: ExtensionResponse;
+    try {
+      response = await context.send('browser_type', {
+        ref: params.ref,
+        selector: params.selector,
+        text: value,
+        clear: params.clear,
+        secret: true,
+      });
+    } catch {
+      return errorResult('Could not deliver the secret to the browser. Check the connection and target field before retrying.');
     }
-    const warning = fieldWarning(response.result);
-    if (warning) {
+    if (!response.success) {
+      return errorResult('Could not fill the target field. Check the field before retrying.');
+    }
+    if (hasFieldWarning(response.result)) {
       // An error, not a success with a note: submitting a field without the secret (a 2FA code
       // above all) burns an attempt.
-      return errorResult(`Did not fill ${params.ref ?? params.selector} as expected: ${warning}. Check the field and fill it again before submitting.`);
+      return errorResult(`Did not fill ${params.ref ?? params.selector} as expected. Check the field and fill it again before submitting.`);
     }
     return textResult(`Filled ${params.ref ?? params.selector} with ${params.secretRef} (${value.length} chars)`);
   },
