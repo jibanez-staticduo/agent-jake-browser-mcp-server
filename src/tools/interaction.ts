@@ -438,6 +438,65 @@ export const fillSecretTool: Tool = createTool({
   },
 });
 
+/**
+ * browser_passkey (INFRA-585): clicks the element that starts a passkey ceremony. The extension
+ * lifts its WebAuthn guard for that ceremony only, with the agent's own passkey for the tab
+ * host (use) or creating one (enroll), and keeps the key in the browser: nothing here ever sees it.
+ */
+export const passkeyTool: Tool = createTool({
+  name: 'browser_passkey',
+  description: 'Sign in to a site with a passkey, or give the agent a passkey for it. Agent tabs refuse every WebAuthn request; this clicks the element that starts ONE passkey ceremony and lifts that refusal only while it lasts. mode "use": click the site\'s "sign in with passkey" button and the agent\'s own passkey for that host signs in. mode "enroll": signed in, click the site\'s "add a passkey" button and the site creates the agent\'s passkey for that host (once per site). The key stays in the browser extension and never reaches this result. Waits up to 20 s for the site to ask.',
+  schema: z.object({
+    ref: z.string().optional().describe('Element reference from browser_state/snapshot of the button that starts the passkey ceremony'),
+    selector: z.string().optional().describe('CSS selector of that button'),
+    mode: z.enum(['enroll', 'use']).describe('"use" signs in with the agent passkey enrolled for the tab host; "enroll" creates it (the site must be signed in)'),
+  }).refine(
+    data => data.ref || data.selector,
+    { message: 'Either ref or selector must be provided' }
+  ),
+  async handle(context, params) {
+    const response = await context.send('browser_passkey', {
+      ref: params.ref,
+      selector: params.selector,
+      mode: params.mode,
+    });
+    if (!response.success) {
+      const message = response.error?.message ?? 'Passkey click failed';
+      return errorResult(/Unknown tool/.test(message)
+        ? 'The browser extension does not know browser_passkey yet: it updates itself (or reload it), then try again.'
+        : message);
+    }
+    const passkey = (response.result as { passkey?: PasskeyOutcome } | undefined)?.passkey;
+    if (!passkey) {
+      return errorResult('The browser extension answered without a passkey report: it is too old for browser_passkey. Nothing was signed.');
+    }
+    const report = `Clicked on ${params.ref ?? params.selector}. ${describePasskey(passkey)}`;
+    if (passkey.guardRestored === false) {
+      return errorResult(`${report} The WebAuthn guard could not be put back on this tab: close it (browser_close_tab) before visiting any other site.`);
+    }
+    return textResult(report);
+  },
+});
+
+/** What the extension reports about a passkey ceremony: never the key nor the user handle. */
+interface PasskeyOutcome {
+  mode: 'enroll' | 'use';
+  host: string;
+  ceremony: 'completed' | 'timeout';
+  passkeys: Array<{ rpId: string; enrolledAt: string }>;
+  guardRestored?: false;
+}
+
+export function describePasskey(p: PasskeyOutcome): string {
+  const which = p.passkeys.map((k) => k.rpId).join(', ') || 'none';
+  if (p.ceremony === 'timeout') {
+    return `Passkey ${p.mode} on ${p.host}: the site asked for no passkey within the wait (passkeys for this host: ${which}).`;
+  }
+  return p.mode === 'enroll'
+    ? `Passkey enrolled on ${p.host} (rpId ${which}).`
+    : `Signed in with the agent passkey for ${which} on ${p.host}.`;
+}
+
 export const interactionTools: Tool[] = [
   clickTool,
   typeTool,
@@ -449,4 +508,5 @@ export const interactionTools: Tool[] = [
   dropTool,
   fillFormTool,
   fillSecretTool,
+  passkeyTool,
 ];

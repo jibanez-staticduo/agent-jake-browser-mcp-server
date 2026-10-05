@@ -7,22 +7,9 @@ import { mkdtemp, writeFile, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { getAllTools } from '../src/tools/index.js';
-import type { Context, ExtensionResponse } from '../src/types.js';
+import { fakeContext } from './helpers/fake-context.js';
 
 const SECRET = 'hunter2-Sup3r$ecret';
-
-function fakeContext(result: unknown = {}) {
-  const sent: Array<{ type: string; payload: Record<string, unknown> }> = [];
-  const context = {
-    async send(type: string, payload: Record<string, unknown> = {}): Promise<ExtensionResponse> {
-      sent.push({ type, payload });
-      return { id: 'x', success: true, result } as ExtensionResponse;
-    },
-    isConnected: () => true,
-    listConnections: () => [],
-  } as unknown as Context;
-  return { context, sent };
-}
 
 const tool = getAllTools().find(x => x.schema.name === 'browser_fill_secret')!;
 
