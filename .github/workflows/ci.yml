@@ -20,9 +20,9 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
-      - name: Check both compiled entrypoints
+      - name: Check compiled entrypoint and HTTP server
         run: |
           test -f dist/index.js
-          test -f dist/http-server.js
           node dist/index.js --help
+          node --check http-server.js
 
