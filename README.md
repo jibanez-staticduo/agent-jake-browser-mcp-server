@@ -129,6 +129,8 @@ also works while nothing is connected.
 | `BROWSER_PUBLIC_ORIGIN` | derived | Origin used to build the approval link returned by `/pair/start`. Set it when the proxy host is not derivable from the request. |
 | `AGENT_BROWSER_OUT_DIR` | system temp dir | Where `browser_pdf` and tool results saved with `filename` write their files. |
 | `AGENT_BROWSER_DROP_DIR` | unset (file drops disabled) | Directory of files available to `browser_drop`. Files must be direct children, with no symlinks; maximum 8 files and 10 MiB total per call. Mount only files intended for browser upload. MIME data-only drops remain available with a 1 MiB limit. |
+| `AGENT_BROWSER_OP_BIN` | `op` | Binary that `browser_fill_secret` runs as `<bin> read <op://ref>`. Point it to a wrapper with the same contract (desktop-app unlock, your own backend choice). |
+| `AGENT_BROWSER_OP_BACKEND` | unset (environment as is) | 1Password backend for `browser_fill_secret`: `connect` (a 1Password Connect server, `OP_CONNECT_HOST` + `OP_CONNECT_TOKEN`; the service account token is dropped) or `service-account` (`OP_SERVICE_ACCOUNT_TOKEN`; `OP_CONNECT_*` are dropped). Any other value is an error. See [1Password](#1password). |
 | `AGENT_BROWSER_ALLOW_UNSAFE_CODE` | unset (disabled) | Set exactly `1` to enable `browser_run_code_unsafe`, which executes arbitrary JavaScript in the MCP server process. Only use it with fully trusted MCP clients. |
 
 PDFs and network or console results written with a path must be direct children of
@@ -199,6 +201,7 @@ ever written into the archive — authentication comes from pairing.
 |------|-------------|
 | `browser_click` | Click on an element |
 | `browser_type` | Type text into an input field |
+| `browser_fill_secret` | Type a 1Password secret (`op://…`, TOTP with `?attribute=otp`) into a field without the value reaching the model |
 | `browser_hover` | Hover over an element |
 | `browser_drag` | Drag an element to another location |
 | `browser_select_option` | Select an option from a dropdown |
@@ -309,3 +312,34 @@ src/
 ## License
 
 MIT - See [LICENSE](LICENSE)
+
+## 1Password
+
+`browser_fill_secret` reads `op://vault/item/field` with the 1Password CLI (`op read`) on the server
+machine and types it with `browser_type`, flagged `secret`. The server omits the value from this tool's
+result and does not forward reader stderr or browser/transport error text. The result only says how
+many characters were typed. This is not a guarantee against reading the page with another tool.
+
+Use only an extension that preserves `secret` and redacts both request and response logs. Legacy
+extensions may discard the flag and log the typed value; installing this server alone does not fix
+their behavior. Selector-only targeting also requires a compatible extension; older versions require
+an element `ref`. Verify the paired extension before enabling secret fills in an installation.
+
+The Docker image ships 1Password CLI 2.39.0 for linux/amd64 and linux/arm64. Builds select the effective
+target architecture and verify pinned archive hashes before installing or executing the CLI. An
+incompatible explicit `TARGETARCH`, unsupported architecture or unverified `OP_VERSION` fails the build.
+Cross-platform builds need native builder nodes or emulation for each target platform.
+
+Pick the backend with `AGENT_BROWSER_OP_BACKEND`:
+
+- `service-account`: requires a nonblank `OP_SERVICE_ACCOUNT_TOKEN`, without silently falling back to a desktop login. On Families and Teams plans every service account of the
+  account shares one daily request quota (1,000 a day on Families), so an agent that logs in often can
+  exhaust it for everything else that uses 1Password.
+- `connect`: a [1Password Connect](https://developer.1password.com/docs/connect/) server
+  (`OP_CONNECT_HOST`, `OP_CONNECT_TOKEN`). Connect keeps a local copy of the vaults it is granted and only
+  spends quota on its own sync, so reads are unlimited.
+
+With Connect, `op read` works, TOTP included (`op://vault/item/<OTP field id>?attribute=otp`), but the CLI
+refuses `op item list` and needs `--vault` plus `--format json` for `op item get`. Connect matches a
+field reference by its **label**, so a field with no label cannot be read. Strip the trailing newline
+from the token printed by `op connect token create` before storing it, or the Authorization header breaks.
