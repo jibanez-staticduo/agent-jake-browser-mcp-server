@@ -36,5 +36,7 @@ jobs:
       # Para que el modo `workflow_dispatch` publique el comentario de COMMIT
       # hace falta `contents: write`. No viene puesto a proposito: sin el, ese
       # modo sigue en verde y deja el review en el resumen del job.
+    with:
+      runner: ${{ vars.AGENT_BROWSER_CI_RUNNER || "ubuntu-latest" }}
     uses: pocharlies-org/k8s-gitops-pocharlies/.github/workflows/reusable-pr-review.yml@main
     secrets: inherit
