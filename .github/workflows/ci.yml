@@ -6,7 +6,7 @@ permissions:
   contents: read
 jobs:
   server:
-    runs-on: ${{ vars.AGENT_BROWSER_CI_RUNNER || "ubuntu-latest" }}
+    runs-on: ${{ vars.AGENT_BROWSER_CI_RUNNER || 'ubuntu-latest' }}
     strategy:
       matrix:
         node: [22, 24]
