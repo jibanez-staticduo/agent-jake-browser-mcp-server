@@ -327,16 +327,17 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
     // Stays tracked: it closes once the browser runs a build that can.
     if (!announced || unsafe.has(connection.connectionId)) return closed;
 
-    // A window goes in one piece when every tab we track in it is due and it holds nothing else.
+    // A window goes in one piece when every tab in it is one of our due tabs.
     const byWindow = new Map<number, TrackedTab[]>();
     if (windowsAnnounced) {
       for (const tab of due) if (tab.windowId !== undefined) byWindow.set(tab.windowId, [...(byWindow.get(tab.windowId) ?? []), tab]);
     }
-    const trackedIds = new Set(mine.map((tab) => tab.tabId));
     const done = new Set<TrackedTab>();
     for (const [windowId, group] of byWindow) {
-      const blocked = staying.some((tab) => tab.windowId === windowId) ||
-        listed.some((l) => l.windowId === windowId && !trackedIds.has(l.id));
+      // Only the due tabs of this window may go: anything else listed in it (staying, dropped on a
+      // reconnection, or never ours) keeps the window open.
+      const groupIds = new Set(group.map((tab) => tab.tabId));
+      const blocked = listed.some((l) => l.windowId === windowId && !groupIds.has(l.id));
       if (blocked || unsafe.has(connection.connectionId)) continue;
       if (await closeWindow(connection.connectionId, windowId, group)) {
         closed += group.length;

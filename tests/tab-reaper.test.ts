@@ -488,4 +488,18 @@ describe('tab reaper: windows', () => {
     await reaper.sessionClosed('s1');
     expect(reaper.tracked()).toEqual([]);
   });
+
+  it('a window holding a tab dropped on a reconnection is not closed whole: only the due tab goes', async () => {
+    const first = await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
+    const windowId = (first.result as { windowId: number }).windowId;
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/two', windowId }); // 101
+    browser.connectedAt = 2000; // the browser reconnected
+    browser.tabs.set(101, 'https://other.example/'); // and 101 now shows another page: maybe not ours
+
+    await reaper.sessionClosed('s1');
+
+    expect(browser.windowCloses()).toEqual([]);
+    expect(browser.closes()).toEqual([100]);
+    expect(browser.tabs.has(101)).toBe(true);
+  });
 });
