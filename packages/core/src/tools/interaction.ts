@@ -5,9 +5,11 @@ import { z } from 'zod';
 import { constants } from 'node:fs';
 import { lstat, open, type FileHandle } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { openPinnedDirectory, pinnedChildPath } from './pinned-directory.js';
 import { createTool, textResult, errorResult } from './types.js';
-import type { Tool } from '../types.js';
+import type { Tool, ExtensionResponse } from '../types.js';
 
 /**
  * Click on an element.
@@ -366,6 +368,115 @@ export const fillFormTool: Tool = createTool({
   },
 });
 
+/**
+ * Treat extension warnings as failure signals, never as safe text to return to the caller.
+ */
+function hasFieldWarning(result: unknown): boolean {
+  const warning = (result as { warning?: unknown } | undefined)?.warning;
+  return typeof warning === 'string' && warning.length > 0;
+}
+
+/**
+ * Where `op` reads from, chosen with AGENT_BROWSER_OP_BACKEND:
+ *   unset            the environment as it is (service account token, Connect, or the desktop app)
+ *   connect          a 1Password Connect server (OP_CONNECT_HOST + OP_CONNECT_TOKEN); the service
+ *                    account token is removed, so the read never spends its daily quota
+ *   service-account  OP_SERVICE_ACCOUNT_TOKEN; OP_CONNECT_* are removed (op refuses both at once)
+ * Any other value is an error: there is no silent fallback to the service account.
+ */
+export function opEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const raw = env.AGENT_BROWSER_OP_BACKEND;
+  if (raw === undefined) return env;
+  const backend = raw.trim().toLowerCase();
+  const out: NodeJS.ProcessEnv = { ...env };
+  if (backend === 'connect') {
+    // A token pasted with its trailing newline breaks the Authorization header.
+    const host = (env.OP_CONNECT_HOST ?? '').trim();
+    const token = (env.OP_CONNECT_TOKEN ?? '').trim();
+    if (!host || !token) throw new Error('AGENT_BROWSER_OP_BACKEND=connect needs OP_CONNECT_HOST and OP_CONNECT_TOKEN');
+    out.OP_CONNECT_HOST = host;
+    out.OP_CONNECT_TOKEN = token;
+    delete out.OP_SERVICE_ACCOUNT_TOKEN;
+    return out;
+  }
+  if (backend === 'service-account') {
+    if (!env.OP_SERVICE_ACCOUNT_TOKEN?.trim()) {
+      throw new Error('AGENT_BROWSER_OP_BACKEND=service-account needs OP_SERVICE_ACCOUNT_TOKEN');
+    }
+    delete out.OP_CONNECT_HOST;
+    delete out.OP_CONNECT_TOKEN;
+    return out;
+  }
+  throw new Error(`AGENT_BROWSER_OP_BACKEND must be connect or service-account, not '${raw}'`);
+}
+
+/**
+ * Read a secret from 1Password ON THE SERVER MACHINE. The reader is `op read <ref>`;
+ * AGENT_BROWSER_OP_BIN points to another binary with the same contract (e.g. a wrapper that
+ * unlocks through the desktop app, or one that picks the backend itself).
+ */
+export async function readSecret(ref: string): Promise<string> {
+  const bin = process.env.AGENT_BROWSER_OP_BIN || 'op';
+  const { stdout } = await promisify(execFile)(bin, ['read', ref], { timeout: 60000, env: opEnv() });
+  return stdout.replace(/\r?\n$/, '');
+}
+
+/**
+ * Type a secret from 1Password into a field. The value never reaches the model: it is not in
+ * the tool arguments or the result. A compatible extension must honor `secret` and redact
+ * both request and response logs; older extensions are not safe for this operation.
+ */
+export const fillSecretTool: Tool = createTool({
+  name: 'browser_fill_secret',
+  description: 'Type a secret from 1Password (op://vault/item/field) into a field. The value is read on the server and omitted from this tool result. Requires a secret-aware extension that redacts request and response logs. Use it for passwords AND for 2FA/TOTP codes, never browser_type. TOTP: reference the OTP field of the item BY ITS FIELD ID with ?attribute=otp (op://vault/item/TOTP_xxxx?attribute=otp) and it types the current code; the field label changes with the app language. Without ?attribute=otp it would type the otpauth:// seed.',
+  schema: z.object({
+    ref: z.string().optional().describe('Element reference from browser_state/snapshot'),
+    selector: z.string().optional().describe('CSS selector to find the element'),
+    secretRef: z.string()
+      .regex(/^op:\/\/[^/?#]+\/[^/?#]+\/(?:[^/?#]+\/)?[^/?#]+(?:\?[^#]+)?$/, 'secretRef must be a complete op://vault/item/field reference')
+      .regex(/^[^\x00-\x1f\x7f]+$/, 'secretRef must not contain control characters')
+      .refine(ref => ref.slice(5).split('?')[0].split('/').every(part => part.trim().length > 0), 'secretRef components must not be blank')
+      .describe('1Password secret reference, op://vault/item/field. TOTP code: op://vault/item/<OTP field id>?attribute=otp'),
+    clear: z.boolean().optional().default(true).describe('Clear existing text before typing'),
+  }).refine(
+    data => data.ref || data.selector,
+    { message: 'Either ref or selector must be provided' }
+  ),
+  async handle(context, params) {
+    let value: string;
+    try {
+      value = await readSecret(params.secretRef);
+    } catch {
+      // A configurable reader may put secrets in stderr or its exception message.
+      return errorResult(`Could not read ${params.secretRef}. Check the configured 1Password reader, credentials and AGENT_BROWSER_OP_BACKEND on the server.`);
+    }
+    if (!value) return errorResult(`Empty secret at ${params.secretRef}`);
+    let response: ExtensionResponse;
+    try {
+      response = await context.send('browser_type', {
+        ref: params.ref,
+        selector: params.selector,
+        text: value,
+        clear: params.clear,
+        secret: true,
+      });
+    } catch {
+      return errorResult('Could not deliver the secret to the browser. Check the connection and target field before retrying.');
+    }
+    if (!response.success) {
+      return errorResult('Could not fill the target field. Check the field before retrying.');
+    }
+    if (hasFieldWarning(response.result) ||
+        (response.result as { typed?: unknown; verified?: unknown } | undefined)?.typed !== true ||
+        (response.result as { verified?: unknown } | undefined)?.verified !== true) {
+      // An error, not a success with a note: submitting a field without the secret (a 2FA code
+      // above all) burns an attempt.
+      return errorResult(`Did not fill ${params.ref ?? params.selector} as expected. Check the field and fill it again before submitting.`);
+    }
+    return textResult(`Filled ${params.ref ?? params.selector} with ${params.secretRef} (${value.length} chars)`);
+  },
+});
+
 export const interactionTools: Tool[] = [
   clickTool,
   typeTool,
@@ -376,4 +487,5 @@ export const interactionTools: Tool[] = [
   uploadFileTool,
   dropTool,
   fillFormTool,
+  fillSecretTool,
 ];

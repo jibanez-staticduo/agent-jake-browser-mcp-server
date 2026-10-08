@@ -316,3 +316,46 @@ See [migration inventory](docs/migration-inventory.md) and the
 ## License
 
 MIT - See [LICENSE](LICENSE)
+
+## 1Password
+
+`browser_fill_secret` reads `op://vault/item/field` with the 1Password CLI (`op read`) on the server
+machine and types it with `browser_type`, flagged `secret`. The server omits the value from this tool's
+result and does not forward reader stderr or browser/transport error text. The result only says how
+many characters were typed. This is not a guarantee against reading the page with another tool.
+
+Use only an extension that preserves `secret` and redacts both request and response logs. Legacy
+extensions may discard the flag and log the typed value; installing this server alone does not fix
+their behavior. Selector-only targeting also requires a compatible extension; older versions require
+an element `ref`. Verify the paired extension before enabling secret fills in an installation.
+
+The packaging installer `scripts/install-op.sh` supports 1Password CLI 2.39.0 for linux/amd64 and linux/arm64. Builds select the effective
+target architecture and verify pinned archive hashes before installing or executing the CLI. An
+incompatible explicit `TARGETARCH`, unsupported architecture or unverified `OP_VERSION` fails the build.
+Cross-platform builds need native builder nodes or emulation for each target platform.
+
+Pick the backend with `AGENT_BROWSER_OP_BACKEND`:
+
+- `service-account`: requires a nonblank `OP_SERVICE_ACCOUNT_TOKEN`, without silently falling back to a desktop login. On Families and Teams plans every service account of the
+  account shares one daily request quota (1,000 a day on Families), so an agent that logs in often can
+  exhaust it for everything else that uses 1Password.
+- `connect`: a [1Password Connect](https://developer.1password.com/docs/connect/) server
+  (`OP_CONNECT_HOST`, `OP_CONNECT_TOKEN`). Connect keeps a local copy of the vaults it is granted and only
+  spends quota on its own sync, so reads are unlimited.
+
+With Connect, `op read` works, TOTP included (`op://vault/item/<OTP field id>?attribute=otp`), but the CLI
+refuses `op item list` and needs `--vault` plus `--format json` for `op item get`. Connect matches a
+field reference by its **label**, so a field with no label cannot be read. Strip the trailing newline
+from the token printed by `op connect token create` before storing it, or the Authorization header breaks.
+
+
+Secret fills are disabled by default. Only the exact value
+`AGENT_BROWSER_FILL_SECRET_ENABLED=true` registers `browser_fill_secret` in HTTP
+and stdio. Keep it disabled until every target extension preserves the secret
+flag, redacts request and response logs, and acknowledges successful fills with
+`{ typed: true, verified: true }`. Missing acknowledgements, failed verification,
+and warnings return a fixed error without reflecting the remote payload.
+
+`AGENT_BROWSER_OP_BIN` defaults to `op` and must implement `<bin> read <ref>`.
+`AGENT_BROWSER_OP_BACKEND` unset preserves the reader environment; it does not
+enable the tool. Configure `connect` or `service-account` as described above.

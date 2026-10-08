@@ -80,6 +80,7 @@ async function startServer(options: {
     BROWSER_EXTENSION_ZIP: options.zipPath,
   };
   delete env.BROWSER_PUBLIC_WS_URL;
+  delete env.AGENT_BROWSER_FILL_SECRET_ENABLED;
   if (options.publicWsUrl) env.BROWSER_PUBLIC_WS_URL = options.publicWsUrl;
 
   const child = spawn(process.execPath, ['dist/http-server.js'], {
@@ -218,7 +219,8 @@ describe('tools/list annotation', () => {
     });
     expect(res.status).toBe(200);
     const tools = res.json.result.tools as Array<{ name: string; inputSchema: any }>;
-    expect(tools.length).toBeGreaterThan(20);
+    expect(tools).toHaveLength(39);
+    expect(tools.map((t) => t.name)).not.toContain('browser_fill_secret');
     expect(tools.map((t) => t.name)).toContain('browser_list_connections');
     for (const tool of tools) {
       expect(tool.inputSchema.properties.connection, tool.name).toEqual({

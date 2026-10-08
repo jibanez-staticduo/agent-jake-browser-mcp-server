@@ -52,7 +52,7 @@ describe('compiled product entrypoints', () => {
     const port = await freePort();
     const child = spawn(process.execPath, ['dist/index.js', '--port', String(port)], {
       cwd: root, stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, BROWSER_WS_HOST: '127.0.0.1' },
+      env: { ...process.env, BROWSER_WS_HOST: '127.0.0.1', AGENT_BROWSER_FILL_SECRET_ENABLED: 'false' },
     });
     let output = '';
     let stderr = '';
@@ -75,6 +75,9 @@ describe('compiled product entrypoints', () => {
       expect(replies.find((r) => r.id === 1)?.result.serverInfo.name, stderr).toBe('agent-jake-browser-mcp');
       expect(replies.find((r) => r.id === 2)?.result.tools.map((t: { name: string }) => t.name), stderr)
         .toContain('browser_list_connections');
+      expect(replies.find((r) => r.id === 2)?.result.tools, stderr).toHaveLength(39);
+      expect(replies.find((r) => r.id === 2)?.result.tools.map((t: { name: string }) => t.name), stderr)
+        .not.toContain('browser_fill_secret');
     } finally {
       child.kill('SIGTERM');
       if (child.exitCode === null) await new Promise<void>((resolve) => child.once('exit', () => resolve()));

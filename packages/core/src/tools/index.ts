@@ -19,7 +19,9 @@ export function getAllTools(): Tool[] {
     ...navigationTools,
     ...stateTools,
     ...snapshotTools,
-    ...interactionTools,
+    ...interactionTools.filter(tool =>
+      tool.schema.name !== 'browser_fill_secret' || process.env.AGENT_BROWSER_FILL_SECRET_ENABLED === 'true'
+    ),
     ...utilityTools,
     ...tabTools,
     ...queryTools,
