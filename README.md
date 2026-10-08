@@ -121,6 +121,7 @@ also works while nothing is connected.
 | `BROWSER_PUBLIC_ORIGIN` | derived | Origin used to build the approval link returned by `/pair/start`. Set it when the proxy host is not derivable from the request. |
 | `AGENT_BROWSER_OUT_DIR` | system temp dir | Where `browser_pdf` and tool results saved with `filename` write their files. |
 | `AGENT_BROWSER_DROP_DIR` | unset (file drops disabled) | Directory of files available to `browser_drop`. Files must be direct children, with no symlinks; maximum 8 files and 10 MiB total per call. Mount only files intended for browser upload. MIME data-only drops remain available with a 1 MiB limit. |
+| `AGENT_BROWSER_FILL_SECRET_ENABLED` | unset (OFF) | Only the exact value `true` registers `browser_fill_secret`. Enable after validating that the installed extension preserves the secret flag, redacts logs, and returns `{ typed: true, verified: true }`. |
 | `AGENT_BROWSER_ALLOW_UNSAFE_CODE` | unset (disabled) | Set exactly `1` to enable `browser_run_code_unsafe`, which executes arbitrary JavaScript in the MCP server process. Only use it with fully trusted MCP clients. |
 
 PDFs and network or console results written with a path must be direct children of
