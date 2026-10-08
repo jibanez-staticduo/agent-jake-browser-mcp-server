@@ -19,4 +19,6 @@ chk "8 pestañas del agente se cierran (tab-reaper)"   grep -q tabReaper http-se
 chk "fill_secret y type no esconden el aviso de longitud de la extensión" grep -q "fieldWarning(response.result)" src/tools/interaction.ts
 chk "cada sesión trabaja en su pestaña (session-tabs)" bash -c 'grep -q "sessionTabs.route(" http-server.js && grep -q "targetTabId" src/session-tabs.ts'
 chk "versión publicada de la extensión en /download/latest.json" bash -c 'grep -q "/download/latest.json" http-server.js && test -f src/published-extension.ts'
+chk "SC-2102 saveSecretTool está en interactionTools" bash -c "sed -n '/^export const interactionTools/,/^];/p' src/tools/interaction.ts | grep -q saveSecretTool"
+chk "SC-2102 onepassword-connect.ts existe y no tiene DELETE, child_process ni node:fs" bash -c '[ -f src/onepassword-connect.ts ] && ! grep -Eq "DELETE|child_process|node:fs" src/onepassword-connect.ts'
 exit $fail

@@ -10,7 +10,7 @@ Servidor MCP que recibe las órdenes del agente y las ejecuta en un Chrome real 
 
 ## Dependencias (en ambos sentidos)
 
-- Depende de: `agent-browser-extension` (WebSocket, puerto 8765, token por pairing) y del CLI `op` 2.39.0 de 1Password (para `browser_fill_secret`, con `OP_SERVICE_ACCOUNT_TOKEN`).
+- Depende de: `agent-browser-extension` (WebSocket, puerto 8765, token por pairing) y de 1Password por dos caminos. Leer: el CLI `op` 2.39.0 para `browser_fill_secret`; en el pod va por un envoltorio que usa 1Password Connect por defecto desde INFRA-528 (`OP_CONNECT_HOST` + `OP_CONNECT_TOKEN`, de solo lectura) y el `OP_SERVICE_ACCOUNT_TOKEN` solo si se cambia `backend`. Escribir: la API REST de Connect con `fetch` para `browser_save_secret`, sin `op` ni subprocesos (`OP_CONNECT_HOST` compartido, `OP_CONNECT_WRITE_TOKEN` con permiso de escritura y aparte del de lectura, `AGENT_BROWSER_SAVE_VAULTS` con los vaults permitidos; sin el token o la lista contesta `SAVE_SECRET_NOT_CONFIGURED`).
 - Dependen de él: el MCP `browser` de todas las sesiones y el repo `k8s-agentjake-browser-mcp-pocharlies` (`k8s/base/manifest.yaml`, app `agentjake-browser`). El `ci.yml` de este repo no construye imagen (no verificado dónde se construye y publica).
 - `deploy/k8s/` de este repo es una guía genérica con `ghcr.io/OWNER/...`; el despliegue real está en el repo k8s.
 
@@ -22,6 +22,7 @@ Node 22, TypeScript 5.9, tsup 8.5, `@modelcontextprotocol/sdk` ^1.30.1, express 
 
 - `src/tools/` (`navigation`, `interaction`, `queries`, `snapshot`, `state`, `tabs`, `utility`, `connections`, `pinned-directory`): una herramienta MCP por función; cada una espeja un handler de la extensión.
 - `src/token-store.ts` y `src/pairing-store.ts`: emisión y verificación de tokens; la autenticación del handshake WebSocket va solo ahí (`verifyClient` en `src/ws-server.ts`).
+- `src/onepassword-connect.ts` (`planSave(destination, opts) -> {write(value)}`): el único escritor a 1Password desde el navegador (SC-2102). `fetch` contra tres endpoints de Connect (vaults, items, item), POST para crear y GET fresco + PUT con el cuerpo crudo para actualizar; sin `DELETE`, sin reintento, sin procesos ni ficheros (`scripts/check-deltas.sh` lo vigila). Errores con texto fijo (`SaveError`), nunca el cuerpo de Connect. Lo usa solo `saveSecretTool` (`src/tools/interaction.ts`).
 - `src/connection-target.ts`: qué navegador recibe cada llamada.
 - `http-server.js`: transporte HTTP streamable (`/mcp`), rutas de pairing y `POST /extension/reload` (solo loopback).
 - `src/tab-reaper.ts`: qué pestañas abrió cada sesión MCP y su cierre al acabar la sesión o por inactividad; lo cablea `http-server.js`.
@@ -34,11 +35,11 @@ Una herramienta nueva = fichero en `src/tools/` + registro en `src/tools/index.t
 
 ## Tests
 
-`npm run typecheck`, `npm test` (Vitest: `server`, `ws-server`, `token-store`, `pairing-store`, `connection-target`, `http-routes`, `fill-secret`, `deploy-k8s`…) y `npm run test:e2e` (Playwright, no en CI).
+`npm run typecheck`, `npm test` (Vitest: `server`, `ws-server`, `token-store`, `pairing-store`, `connection-target`, `http-routes`, `fill-secret`, `onepassword-connect`, `save-secret`, `save-secret-wire`, `deploy-k8s`…; `tests/helpers/fake-connect.ts` es un Connect falso que también corre suelto: `npx tsx tests/helpers/fake-connect.ts --port 0`) y `npm run test:e2e` (Playwright, no en CI).
 
 ## CI/CD y despliegue
 
-`ci.yml` en `arc-k8s`: `build-test` (tsc + vitest, Node 22.23.2 verificado por sha256) y `deltas` (`scripts/check-deltas.sh`: sin bind fijo a `0.0.0.0`, `verifyClient` presente, `stateTools` registrado, `tabReaper` cableado); además los workflows estándar `duplicados.yml` y `pr-review.yml`. El despliegue lo lleva `k8s-agentjake-browser-mcp-pocharlies` (ArgoCD); este repo no se despliega solo.
+`ci.yml` en `arc-k8s`: `build-test` (tsc + vitest, Node 22.23.2 verificado por sha256) y `deltas` (`scripts/check-deltas.sh`: sin bind fijo a `0.0.0.0`, `verifyClient` presente, `stateTools` registrado, `tabReaper` cableado, `saveSecretTool` en `interactionTools`, `onepassword-connect.ts` sin `DELETE`, `child_process` ni `node:fs`); además los workflows estándar `duplicados.yml` y `pr-review.yml`. El despliegue lo lleva `k8s-agentjake-browser-mcp-pocharlies` (ArgoCD); este repo no se despliega solo.
 
 ## Decisiones y trampas
 
@@ -47,6 +48,7 @@ Una herramienta nueva = fichero en `src/tools/` + registro en `src/tools/index.t
 - El WebSocket nunca escucha en `0.0.0.0` sin token; el handshake exige token.
 - `browser_fill_secret` lee `op://…` en el servidor: el secreto no pasa por el transcript del agente.
 - `browser_passkey` (INFRA-585) manda `mode` y el objetivo a la extensión, que hace la ceremonia con la passkey propia del agente guardada en el navegador: la clave nunca llega al servidor. Error si la extensión no conoce la herramienta, si responde sin informe de passkey o si el guard de WebAuthn no volvió (pide cerrar la pestaña). En AgentGateway va con la misma puerta que `browser_fill_secret`.
+- `browser_save_secret` (SC-2102) lleva un valor de la página a un campo de 1Password sin pasar por el transcript. Compone dos mitades como `browser_fill_secret` compone `browser_type`: pide a la extensión el mensaje interno `browser_read_secret` (no es herramienta MCP; una extensión vieja contesta `UNKNOWN_TOOL` y sale `SAVE_SECRET_EXTENSION_TOO_OLD` tras un solo mensaje) y escribe con `planSave`. El orden es contrato interno: validar, configuración y allowlist, resolver vault e ítem (solo lecturas), **entonces** leer la página, normalizar y plantilla, y escribir; no se lee de la página lo que no se va a poder guardar. El resultado es solo `{saved, destination, length}`; los errores son `CODIGO: texto fijo`, sin el `message` de la extensión ni el cuerpo de Connect; el GET de un ítem trae los valores de todos sus campos y solo viven en memoria. Trampas: la `template` es texto fijo y nunca un secreto (AgentGateway registra los argumentos); dos guardados en el mismo ítem con menos de ~3 s pueden pisarse (caché de Connect); `NEW_ITEM_CATEGORY` (`SECURE_NOTE`) está sin medir contra el Connect real; el token con escritura de Connect también podría borrar, y «sin borrado» solo lo garantiza este código (allowlist de vaults, `overwrite` en false). Un destino «fichero del host» se descartó: sería otra herramienta.
 - Renombrar una herramienta MCP rompe a todas las sesiones: se añade una nueva y se deja la vieja.
 - Las pestañas que abre un agente (`browser_new_tab` o un clic que abre otra) se cierran solas al acabar su sesión MCP o tras 60 min sin uso (`src/tab-reaper.ts`; `AGENT_BROWSER_TAB_IDLE_MINUTES`, 0 lo apaga). Las que no abrió el agente no se tocan nunca. `keepOpenMinutes` (máx. 1440) en `browser_new_tab`/`browser_switch_tab` retiene la de un pago que espera a Dani; si su sesión acabó y otra trabaja en ella (`confirmar_pago`), pasa a ser de esa. Solo en el transporte HTTP: en stdio el proceso es la sesión y es local de un solo usuario. El registro vive en memoria: un reinicio del pod olvida las pestañas abiertas antes. Cierra por id solo en un navegador cuya extensión anuncia `closeById` en `browser_list_tabs` (`agent-browser-extension#18`; las anteriores cerraban la conectada) y da el cierre por bueno solo si la extensión devuelve ese id.
 - Clones duplicados en el host: ver C5 de SC-1425.

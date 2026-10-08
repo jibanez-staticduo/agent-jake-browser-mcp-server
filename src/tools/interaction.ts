@@ -9,7 +9,9 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { openPinnedDirectory, pinnedChildPath } from './pinned-directory.js';
 import { createTool, textResult, errorResult } from './types.js';
-import type { Tool } from '../types.js';
+import { planSave, saveError, SaveError } from '../onepassword-connect.js';
+import { logger } from '../utils/logger.js';
+import type { ExtensionResponse, Tool } from '../types.js';
 
 /**
  * Click on an element.
@@ -438,6 +440,88 @@ export const fillSecretTool: Tool = createTool({
   },
 });
 
+/** What the extension may say about browser_read_secret: a closed set, with texts that carry no page content. */
+const SECRET_TEXT: Record<string, string> = {
+  SECRET_NO_MATCH: 'No element matches the selector',
+  SECRET_AMBIGUOUS: 'More than one element matches the selector',
+  SECRET_EMPTY: 'The element has no text',
+  SECRET_REGEX_INVALID: 'The regex is not valid or has no capture group',
+  SECRET_REGEX_NO_MATCH: 'The regex did not match',
+  SECRET_TOO_LARGE: 'The text is too large',
+};
+
+/** The value of a browser_read_secret answer, or the SaveError for what went wrong. Never the extension's own message. */
+function capturedValue(response: ExtensionResponse): string {
+  if (!response.success) {
+    const { code = '', message = '' } = response.error ?? {};
+    // Like browser_passkey: an extension that predates the message answers UNKNOWN_TOOL.
+    if (code === 'UNKNOWN_TOOL' || /Unknown tool/.test(message)) throw saveError('SAVE_SECRET_EXTENSION_TOO_OLD');
+    if (code in SECRET_TEXT) {
+      const count = code === 'SECRET_AMBIGUOUS' ? /^(\d{1,6}) elements match the selector$/.exec(message)?.[1] : undefined;
+      throw new SaveError(code, count ? `${count} elements match the selector` : SECRET_TEXT[code]);
+    }
+    const known = /^[A-Z][A-Z_]{2,31}$/.test(code) ? ` (${code})` : '';
+    throw new SaveError('SAVE_SECRET_EXTENSION_ERROR', `The browser extension could not read the value from the page${known}.`);
+  }
+  const value = (response.result as { value?: unknown } | undefined)?.value;
+  if (typeof value !== 'string' || !value) throw saveError('SAVE_SECRET_EXTENSION_ERROR');
+  if (value.length > 4096) throw saveError('SAVE_SECRET_VALUE_TOO_LARGE');
+  return value;
+}
+
+const saveDestination = z.object({
+  vault: z.string().describe('1Password vault, by name or id. Must be one the server allows (AGENT_BROWSER_SAVE_VAULTS)'),
+  item: z.string().describe('Item title, or its 26-character id. Created when no item has that title'),
+  field: z.string().describe('Field label (or id) that receives the value'),
+});
+
+const saveSecret = createTool({
+  name: 'browser_save_secret',
+  description: 'Copy a value shown on the page (a TOTP seed, an API token) into a field of a 1Password item WITHOUT the value passing through you: it goes from the browser to the server to 1Password and the result only says that it was saved and how long it was. Pick the value with ref/selector (its text, or the value of an input) and/or a regex whose capture group 1 is the value (with only a regex, the whole page text is searched). destination: {vault, item, field}; the item is created when it does not exist. type "otp" stores a TOTP field: a seed that is not an otpauth:// URI must be base32 (spaces and dashes are ignored). template wraps the value, e.g. "otpauth://totp/me?secret={value}&issuer=x"; it must contain {value} once and is FIXED TEXT, never a secret (tool calls are logged). An existing field with a value is not replaced unless overwrite is true. Never deletes anything. Two saves in the same item less than about 3 seconds apart can overwrite each other (Connect caches). Read-only elsewhere: it does not hide the value from browser_get_text, browser_evaluate or screenshots.',
+  schema: z.object({
+    ref: z.string().optional().describe('Element reference from browser_state/snapshot'),
+    selector: z.string().optional().describe('CSS selector; it must match exactly one element'),
+    regex: z.string().min(1).max(256).optional().describe('Regex (no flags) whose capture group 1 is the value, applied to the element text (or the page text without ref/selector)'),
+    destination: saveDestination,
+    type: z.enum(['concealed', 'otp']).optional().default('concealed').describe('Kind of 1Password field'),
+    template: z.string().max(512).optional().describe('Fixed text around the value, with {value} once. Never put a secret in it'),
+    overwrite: z.boolean().optional().default(false).describe('Replace a field that already has a value'),
+  }).refine(
+    data => data.ref || data.selector || data.regex,
+    { message: 'ref, selector or regex must be provided' }
+  ),
+  async handle(context, params) {
+    const { vault, item, field } = params.destination;
+    try {
+      // Plan §2 order: validate, configuration and allowlist, resolve vault and item (reads only), THEN read the page.
+      if (params.template !== undefined && params.template.split('{value}').length !== 2) throw saveError('SAVE_SECRET_TEMPLATE_INVALID');
+      const plan = await planSave(params.destination, { type: params.type === 'otp' ? 'OTP' : 'CONCEALED', overwrite: params.overwrite });
+      const captured = capturedValue(await context.send('browser_read_secret', { ref: params.ref, selector: params.selector, regex: params.regex }));
+      let value = captured;
+      if (params.type === 'otp' && !value.startsWith('otpauth://')) {
+        // Seeds are shown in groups of four, sometimes lowercase; saving them as typed would give wrong codes without a warning.
+        value = value.replace(/[\s-]/g, '').toUpperCase();
+        if (!/^[A-Z2-7]{16,128}=*$/.test(value)) throw saveError('SAVE_SECRET_VALUE_NOT_BASE32');
+      }
+      // split/join, never String.replace: it would read `$&` or `$1` inside the value.
+      await plan.write(params.template === undefined ? value : params.template.split('{value}').join(value));
+      logger.info(`[save_secret] vault=${vault} item=${item} field=${field} length=${value.length}`);
+      return textResult(JSON.stringify({ saved: true, destination: { vault, item, field }, length: value.length }));
+    } catch (error) {
+      if (error instanceof SaveError) return errorResult(`${error.code}: ${error.message}`);
+      throw error;
+    }
+  },
+});
+
+export const saveSecretTool: Tool = {
+  schema: saveSecret.schema,
+  // A destination that is missing or malformed gets the same code as every other bad destination.
+  handle: (context, params) => saveDestination.safeParse(params?.destination).success
+    ? saveSecret.handle(context, params)
+    : Promise.resolve(errorResult(`SAVE_SECRET_INVALID_DESTINATION: ${saveError('SAVE_SECRET_INVALID_DESTINATION').message}`)),
+};
+
 /**
  * browser_passkey (INFRA-585): clicks the element that starts a passkey ceremony. The extension
  * lifts its WebAuthn guard for that ceremony only, with the agent's own passkey for the tab
@@ -508,5 +592,6 @@ export const interactionTools: Tool[] = [
   dropTool,
   fillFormTool,
   fillSecretTool,
+  saveSecretTool,
   passkeyTool,
 ];

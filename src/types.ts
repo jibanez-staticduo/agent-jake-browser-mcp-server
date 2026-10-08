@@ -53,7 +53,9 @@ export type ToolName =
   | 'browser_cdp'
   | 'browser_drop'
   | 'browser_fill_form'
-  | 'browser_passkey';
+  | 'browser_passkey'
+  // Internal to browser_save_secret: not an MCP tool, the extension answers the value to the server only
+  | 'browser_read_secret';
 
 /**
  * Message sent to the extension via WebSocket.

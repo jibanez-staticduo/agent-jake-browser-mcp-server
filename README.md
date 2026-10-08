@@ -134,6 +134,9 @@ also works while nothing is connected.
 | `AGENT_BROWSER_CONNECTION_LABELS` | unset | JSON map of `connectionId` to a friendly name (e.g. `{"259bc…":"mac"}`), so an MCP session can pick a paired browser by `id` or `name` instead of the global most-recently-used. |
 | `AGENT_BROWSER_DEFAULT_CONNECTION` | unset (most recently used) | Connection `id` or `name` used when a session has not chosen one. |
 | `AGENT_BROWSER_OP_BIN` | `op` | Reader binary for `browser_fill_secret`, invoked as `<bin> read <op://ref>` on the server machine to pull a 1Password secret without it crossing the transcript. |
+| `OP_CONNECT_HOST` | unset | Base URL of a 1Password Connect server (`http://host:8080`). The `op` wrapper of the pod uses it for `browser_fill_secret`, and `browser_save_secret` writes through it. |
+| `OP_CONNECT_WRITE_TOKEN` | unset | Connect token WITH write access, separate from the read-only `OP_CONNECT_TOKEN`. Without it `browser_save_secret` answers `SAVE_SECRET_NOT_CONFIGURED`. Seed it with `tr -d '\n'`. |
+| `AGENT_BROWSER_SAVE_VAULTS` | unset | Comma-separated vault names or ids `browser_save_secret` may write to (the in-pod wall behind the token's own scope). Empty means `SAVE_SECRET_NOT_CONFIGURED`. |
 
 PDFs and network or console results written with a path must be direct children of
 `AGENT_BROWSER_OUT_DIR` (or the system temp directory by default). Existing files
@@ -236,6 +239,24 @@ ever written into the archive — authentication comes from pairing.
 | `browser_screenshot` | Take a screenshot of the page |
 | `browser_get_console_logs` | Get console log messages |
 
+### Secrets (2 tools)
+
+| Tool | Description |
+|------|-------------|
+| `browser_fill_secret` | Read an `op://` reference on the server machine and type it into a field; the value never appears in arguments, results or logs |
+| `browser_save_secret` | Copy a value shown on the page (a TOTP seed, an API token) into a field of a 1Password item: `ref`/`selector`/`regex` pick it, `destination: {vault, item, field}` receives it, `type` is `concealed` (default) or `otp`, `template` wraps it, `overwrite` (default false) replaces a field that already has a value |
+
+`browser_save_secret` asks the extension for the value through the internal message
+`browser_read_secret` (never an MCP tool) and writes it with plain `fetch` to the Connect REST API
+(`src/onepassword-connect.ts`): no subprocess, no file, no delete. The result is only
+`{"saved":true,"destination":{...},"length":N}`. Errors are `Error: CODE: fixed text`
+(`SECRET_*` from the page, `SAVE_SECRET_*` from the server); neither the extension's message nor
+Connect's body ever comes back. Two things to know: the `template` is fixed text and never a secret
+(AgentGateway logs the call's arguments), and two saves into the same item less than about 3 seconds
+apart can overwrite each other (Connect answers from a cache). `browser_get_text`, `browser_evaluate` and
+screenshots can still read the same value from the page: this tool keeps it out of the transcript when
+saving, it does not hide it.
+
 ### Connections (1 tool)
 
 | Tool | Description |
@@ -284,6 +305,7 @@ src/
 ├── server.ts          # MCP server implementation
 ├── context.ts         # Extension communication context
 ├── ws-server.ts       # WebSocket server for extension
+├── onepassword-connect.ts # Connect REST writer behind browser_save_secret
 ├── types.ts           # TypeScript type definitions
 ├── tools/             # Tool implementations
 │   ├── index.ts       # Tool registry
