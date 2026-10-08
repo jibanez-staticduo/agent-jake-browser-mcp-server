@@ -35,7 +35,7 @@ beforeEach(async () => {
   fake = await startFakeConnect();
   process.env.OP_CONNECT_HOST = fake.url;
   process.env.OP_CONNECT_WRITE_TOKEN = 'write-token';
-  process.env.AGENT_BROWSER_SAVE_VAULTS = 'llavero';
+  process.env.AGENT_BROWSER_SAVE_VAULTS = 'jl5w33zmwcgl4ypvle7chbxu5i,wfovwhcnq22jzbhaaupp24fb2y';
   output = [];
   const capture = (...args: unknown[]) => { output.push(args.map(String).join(' ')); return true; };
   for (const m of ['error', 'warn', 'log', 'info', 'debug'] as const) vi.spyOn(console, m).mockImplementation(capture);

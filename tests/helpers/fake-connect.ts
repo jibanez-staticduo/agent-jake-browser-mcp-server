@@ -3,7 +3,7 @@
  * (vaults, items by title filter, item GET/POST/PUT), with state in memory.
  * In tests: `startFakeConnect()`. Alone, for qa:
  *   npx tsx tests/helpers/fake-connect.ts --port 0     # first line printed = the port
- *   OP_CONNECT_HOST=http://127.0.0.1:PORT OP_CONNECT_WRITE_TOKEN=x AGENT_BROWSER_SAVE_VAULTS=llavero ...
+ *   OP_CONNECT_HOST=http://127.0.0.1:PORT OP_CONNECT_WRITE_TOKEN=x AGENT_BROWSER_SAVE_VAULTS=jl5w33zmwcgl4ypvle7chbxu5i,wfovwhcnq22jzbhaaupp24fb2y ...
  * GET /__requests lists what it has received (method, path, headers, body).
  */
 import { createServer } from 'node:http';
@@ -31,7 +31,14 @@ export interface FakeConnect {
 }
 
 export async function startFakeConnect(port = 0): Promise<FakeConnect> {
-  const vaults = [{ id: id26('llavero'), name: 'llavero' }, { id: id26('otro'), name: 'otro' }];
+  // The two allowed vaults carry their real Connect ids (SC-2102 C2: the allowlist is
+  // compared by id, so the suite must pin the ids H3 will deploy). 'otro' stays outside
+  // the allowlist to test the refusal.
+  const vaults = [
+    { id: 'jl5w33zmwcgl4ypvle7chbxu5i', name: 'llavero' },
+    { id: 'wfovwhcnq22jzbhaaupp24fb2y', name: 'k8s-pocharlies' },
+    { id: id26('otro'), name: 'otro' },
+  ];
   const item = (n: string, title: string, fields: Field[]): Item => ({ id: id26(n), title, category: 'SECURE_NOTE', vault: { id: vaults[0].id }, fields });
   const items: Item[] = [
     item('existente', 'Existente', [

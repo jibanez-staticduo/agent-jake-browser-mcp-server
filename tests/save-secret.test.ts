@@ -30,7 +30,8 @@ beforeEach(async () => {
   fake = await startFakeConnect();
   process.env.OP_CONNECT_HOST = fake.url;
   process.env.OP_CONNECT_WRITE_TOKEN = 'write-token';
-  process.env.AGENT_BROWSER_SAVE_VAULTS = 'llavero';
+  // C2 (security): the allowlist is compared by vault id — the suite pins the ids H3 will deploy.
+  process.env.AGENT_BROWSER_SAVE_VAULTS = 'jl5w33zmwcgl4ypvle7chbxu5i,wfovwhcnq22jzbhaaupp24fb2y';
   output = [];
   const capture = (...args: unknown[]) => { output.push(args.map(String).join(' ')); return true; };
   for (const m of ['error', 'warn', 'log', 'info', 'debug'] as const) vi.spyOn(console, m).mockImplementation(capture);
@@ -81,6 +82,7 @@ describe('browser_save_secret: nothing is read from the page unless it can be wr
     ['no write token', () => { delete process.env.OP_CONNECT_WRITE_TOKEN; }, {}, 'SAVE_SECRET_NOT_CONFIGURED'],
     ['empty allowlist', () => { process.env.AGENT_BROWSER_SAVE_VAULTS = ''; }, {}, 'SAVE_SECRET_NOT_CONFIGURED'],
     ['vault outside the allowlist', () => {}, { destination: { ...destination, vault: 'otro' } }, 'SAVE_SECRET_INVALID_DESTINATION'],
+    ['allowlist of names only (C2: the id decides)', () => { process.env.AGENT_BROWSER_SAVE_VAULTS = 'llavero'; }, {}, 'SAVE_SECRET_INVALID_DESTINATION'],
     ['quote in the item', () => {}, { destination: { ...destination, item: 'a"b' } }, 'SAVE_SECRET_INVALID_DESTINATION'],
     ['vault that does not exist', () => { process.env.AGENT_BROWSER_SAVE_VAULTS = 'fantasma'; }, { destination: { ...destination, vault: 'fantasma' } }, 'SAVE_SECRET_VAULT_NOT_FOUND'],
     ['two items with that title', () => {}, { destination: { ...destination, item: 'Duplicado' } }, 'SAVE_SECRET_ITEM_AMBIGUOUS'],

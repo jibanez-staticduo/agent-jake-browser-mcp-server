@@ -85,7 +85,7 @@ export async function planSave(dest: Destination, opts: SaveOptions): Promise<{ 
   const vaults: Array<{ id: string; name: string }> = await call('GET', '/vaults');
   const v = vaults.find((x) => x.id === vault || x.name === vault);
   if (!v) throw saveError('SAVE_SECRET_VAULT_NOT_FOUND');
-  if (!allowed.includes(v.id) && !allowed.includes(v.name)) throw saveError('SAVE_SECRET_INVALID_DESTINATION');
+  if (!allowed.includes(v.id)) throw saveError('SAVE_SECRET_INVALID_DESTINATION'); // C2 (security): the wall is the vault id, never the name
 
   const base = `/vaults/${v.id}/items`;
   let found: RawItem | undefined;

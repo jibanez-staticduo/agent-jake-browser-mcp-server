@@ -18,7 +18,7 @@ beforeEach(async () => {
   process.env.OP_CONNECT_HOST = fake.url;
   process.env.OP_CONNECT_TOKEN = 'READ-TOKEN-NOT-FOR-WRITES';
   process.env.OP_CONNECT_WRITE_TOKEN = 'write-token\n'; // the trailing newline of a secret seeded with echo
-  process.env.AGENT_BROWSER_SAVE_VAULTS = 'llavero';
+  process.env.AGENT_BROWSER_SAVE_VAULTS = 'jl5w33zmwcgl4ypvle7chbxu5i,wfovwhcnq22jzbhaaupp24fb2y';
 });
 afterEach(async () => {
   await fake.close();
@@ -108,12 +108,18 @@ describe('planSave: destination and configuration', () => {
     expect(await codeOf(planSave(dest({ vault: 'fantasma' }), concealed))).toBe('SAVE_SECRET_VAULT_NOT_FOUND');
   });
 
-  it('a vault outside AGENT_BROWSER_SAVE_VAULTS is refused, by name or by id, and an allowed id works', async () => {
+  it('a vault outside AGENT_BROWSER_SAVE_VAULTS is refused by id, and an allowed id works', async () => {
     expect(await codeOf(planSave(dest({ vault: 'otro' }), concealed))).toBe('SAVE_SECRET_INVALID_DESTINATION');
-    expect(await codeOf(planSave(dest({ vault: fake.vaults[1].id }), concealed))).toBe('SAVE_SECRET_INVALID_DESTINATION');
-    process.env.AGENT_BROWSER_SAVE_VAULTS = ` otro , ${fake.vaults[0].id}`;
+    expect(await codeOf(planSave(dest({ vault: fake.vaults[2].id }), concealed))).toBe('SAVE_SECRET_INVALID_DESTINATION');
+    process.env.AGENT_BROWSER_SAVE_VAULTS = ` ${fake.vaults[2].id} , ${fake.vaults[0].id}`;
     await planSave(dest({ vault: 'llavero' }), concealed);
     await planSave(dest({ vault: 'otro' }), concealed);
+    expect(writes()).toEqual([]);
+  });
+
+  it('an allowlist of names alone is no allowlist: the id decides (C2)', async () => {
+    process.env.AGENT_BROWSER_SAVE_VAULTS = 'llavero,k8s-pocharlies';
+    expect(await codeOf(planSave(dest(), concealed))).toBe('SAVE_SECRET_INVALID_DESTINATION');
     expect(writes()).toEqual([]);
   });
 
@@ -225,7 +231,7 @@ describe('tests/helpers/fake-connect.ts run alone (what qa uses)', () => {
       });
       expect(port).toBeGreaterThan(0);
       const res = await fetch(`http://127.0.0.1:${port}/v1/vaults`, { headers: { Authorization: 'Bearer x' } });
-      expect((await res.json()).map((v: { name: string }) => v.name)).toEqual(['llavero', 'otro']);
+      expect((await res.json()).map((v: { name: string }) => v.name)).toEqual(['llavero', 'k8s-pocharlies', 'otro']);
     } finally {
       child.kill();
     }
