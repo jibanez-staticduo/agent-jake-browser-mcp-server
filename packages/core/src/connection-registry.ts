@@ -8,8 +8,9 @@
  */
 import { WebSocket } from 'ws';
 import type { BrowserConnectionInfo } from './types.js';
+import type { ClientIpInfo } from './client-ip.js';
 
-export interface ManagedConnection {
+export interface ManagedConnection extends ClientIpInfo {
   connectionId: string;
   ws: WebSocket;
   label: string;
@@ -43,6 +44,9 @@ export class ConnectionRegistry {
     ws: WebSocket;
     label?: string;
     userAgent?: string;
+    clientIp?: string | null;
+    peerIp?: string | null;
+    clientIpSource?: ClientIpInfo['clientIpSource'];
     now?: number;
   }): { added: ManagedConnection; replaced: ManagedConnection | null } {
     const at = input.now ?? Date.now();
@@ -50,6 +54,9 @@ export class ConnectionRegistry {
       connectionId: input.connectionId,
       ws: input.ws,
       label: input.label || '',
+      clientIp: input.clientIp ?? null,
+      peerIp: input.peerIp ?? null,
+      clientIpSource: input.clientIpSource ?? 'socket',
       userAgent: input.userAgent || '',
       connectedAt: at,
       lastActiveAt: at,
@@ -138,6 +145,9 @@ export class ConnectionRegistry {
       .map((c) => ({
         connectionId: c.connectionId,
         label: c.label,
+        clientIp: c.clientIp,
+        peerIp: c.peerIp,
+        clientIpSource: c.clientIpSource,
         userAgent: c.userAgent,
         connectedAt: c.connectedAt,
         lastActiveAt: c.lastActiveAt,

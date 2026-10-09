@@ -11,6 +11,7 @@ import { timingSafeEqual } from 'crypto';
 import { logger } from './utils/logger.js';
 import { getSharedTokenStore, type TokenStore } from './token-store.js';
 import { ConnectionRegistry, type ManagedConnection } from './connection-registry.js';
+import { getClientIpInfo, parseTrustedProxyIps } from './client-ip.js';
 import type { BrowserConnectionInfo, ExtensionMessage, ExtensionResponse } from './types.js';
 
 export interface WSServerOptions {
@@ -87,6 +88,7 @@ export function createWSServer(options: WSServerOptions): WSServer {
   const { port, onConnection, onDisconnection, onMessage } = options;
   const tokenStore = options.tokenStore ?? getSharedTokenStore();
   const registry = new ConnectionRegistry();
+  const trustedProxyIps = parseTrustedProxyIps(process.env.BROWSER_TRUSTED_PROXY_IPS);
   const pendingRequests = new Map<string, {
     resolve: (response: ExtensionResponse) => void;
     reject: (error: Error) => void;
@@ -143,6 +145,7 @@ export function createWSServer(options: WSServerOptions): WSServer {
       ws,
       label: params.label?.trim() || undefined,
       userAgent: req.headers['user-agent'],
+      ...getClientIpInfo(req, trustedProxyIps, process.env.BROWSER_TRUST_PROXY === 'true' && isAuthEnabled()),
     });
 
     if (replaced) {

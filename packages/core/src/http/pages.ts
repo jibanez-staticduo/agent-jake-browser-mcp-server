@@ -56,7 +56,7 @@ async function load() {
       const id = element('td');
       id.appendChild(element('code', c.connectionId));
       row.appendChild(id);
-      row.appendChild(element('td', c.label || ''));
+      row.appendChild(element('td', c.label || (c.clientIp ? 'IP ' + c.clientIp : 'Desconocido')));
       row.appendChild(element('td', c.open ? 'abierta' : 'cerrada'));
       row.appendChild(element('td', Math.round(c.secondsSinceLastActivity) + 's'));
       const active = element('td');

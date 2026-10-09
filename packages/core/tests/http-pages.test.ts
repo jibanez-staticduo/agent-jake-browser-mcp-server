@@ -50,7 +50,7 @@ describe('connections page rendering', () => {
     const label = '<svg onload=alert(2)> & "Equipo"';
     const wsUrl = 'wss://example.invalid/<script>alert(3)</script>';
     const { box, load } = page({
-      connections: [{ connectionId, label, open: true, active: true, secondsSinceLastActivity: 2.4 }],
+      connections: [{ connectionId, label, clientIp: '192.0.2.1', open: true, active: true, secondsSinceLastActivity: 2.4 }],
       authEnabled: true,
       wsUrl,
     });
@@ -75,12 +75,21 @@ describe('connections page rendering', () => {
     const { box, load } = page(data);
     await load();
     const cells = box.children[0]!.children[1]!.children[0]!.children;
-    expect(cells[1]!.textContent).toBe('');
+    expect(cells[1]!.textContent).toBe('Desconocido');
     expect(cells[2]!.textContent).toBe('cerrada');
     expect(cells[4]!.children).toHaveLength(0);
     data.connections = [];
     await load();
     expect(box.children).toHaveLength(0);
     expect(box.textContent).toContain('Ninguna conexión abierta');
+  });
+
+  it('renders an IP fallback as literal text when labels are absent', async () => {
+    const clientIp = '<img src=x onerror=alert(1)>';
+    const { box, load } = page({ connections: [{ connectionId: 'legacy', label: '', clientIp }] });
+    await load();
+    const cell = box.children[0]!.children[1]!.children[0]!.children[1]!;
+    expect(cell.textContent).toBe('IP ' + clientIp);
+    expect(cell.children).toHaveLength(0);
   });
 });

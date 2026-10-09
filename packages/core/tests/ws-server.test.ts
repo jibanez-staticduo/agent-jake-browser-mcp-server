@@ -49,13 +49,14 @@ function connect(
   port: number,
   params: { token?: string; connectionId?: string; label?: string },
   autoReply = true,
+  headers?: Record<string, string | string[]>,
 ): Promise<FakeExtension> {
   const query = new URLSearchParams();
   if (params.token) query.set('token', params.token);
   if (params.connectionId) query.set('connectionId', params.connectionId);
   if (params.label) query.set('label', params.label);
 
-  const socket = new WebSocket(`ws://127.0.0.1:${port}/${query.toString() ? `?${query}` : ''}`);
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/${query.toString() ? `?${query}` : ''}`, { headers });
   clients.push(socket);
 
   const messages: ExtensionMessage[] = [];
@@ -103,6 +104,8 @@ afterEach(async () => {
   rmSync(tempDir, { recursive: true, force: true });
   delete process.env.BROWSER_WS_TOKEN;
   delete process.env.BROWSER_ALLOW_PAIRING;
+  delete process.env.BROWSER_TRUSTED_PROXY_IPS;
+  delete process.env.BROWSER_TRUST_PROXY;
   vi.restoreAllMocks();
 });
 
@@ -223,6 +226,74 @@ describe('multi-connection registry', () => {
     expect(server!.getConnection()).not.toBeNull();
     expect(server!.getConnection('chrome-a')).not.toBeNull();
     expect(server!.getConnection('chrome-z')).toBeNull();
+  });
+});
+
+describe('connection IP metadata over real WebSockets', () => {
+  beforeEach(() => { delete process.env.BROWSER_TRUST_PROXY; });
+  async function start(trusted?: string) {
+    if (trusted) process.env.BROWSER_TRUSTED_PROXY_IPS = trusted;
+    else delete process.env.BROWSER_TRUSTED_PROXY_IPS;
+    server = createWSServer({ port: 0, host: '127.0.0.1', tokenStore: createTokenStore(join(tempDir, 'tokens.json')) });
+    return serverPort(server);
+  }
+
+  it('ignores forged headers by default for a legacy connection', async () => {
+    const port = await start();
+    await connect(port, {}, false, { 'X-Real-IP': '203.0.113.9', 'X-Forwarded-For': '203.0.113.10' });
+    expect(server!.listConnectionInfos()[0]).toMatchObject({ connectionId: 'anon-1', label: '', clientIp: '127.0.0.1', peerIp: '127.0.0.1', clientIpSource: 'socket' });
+  });
+
+  it('retains manual labels and validated IPv6 metadata from an explicitly trusted peer', async () => {
+    const port = await start('::ffff:127.0.0.1');
+    await connect(port, { label: 'Equipo', connectionId: 'labelled' }, false, { 'X-Real-IP': '2001:0db8::2' });
+    expect(server!.listConnectionInfos()[0]).toMatchObject({ label: 'Equipo', clientIp: '2001:db8::2', peerIp: '127.0.0.1', clientIpSource: 'x-real-ip' });
+  });
+
+  it('accepts the last XFF address and falls back for invalid and duplicate headers', async () => {
+    const port = await start('127.0.0.1');
+    await connect(port, { connectionId: 'xff' }, false, { 'X-Forwarded-For': '203.0.113.9, 192.0.2.2', 'X-Real-IP': '203.0.113.99' });
+    await connect(port, { connectionId: 'bad' }, false, { 'X-Real-IP': '192.0.2.2', 'X-Forwarded-For': 'invalid' });
+    await connect(port, { connectionId: 'duplicate' }, false, { 'X-Real-IP': ['192.0.2.1', '192.0.2.2'] });
+    const infos = server!.listConnectionInfos();
+    expect(infos.find((c) => c.connectionId === 'xff')).toMatchObject({ clientIp: '192.0.2.2', clientIpSource: 'x-forwarded-for' });
+    for (const id of ['bad', 'duplicate']) expect(infos.find((c) => c.connectionId === id)).toMatchObject({ clientIp: '127.0.0.1', clientIpSource: 'socket' });
+  });
+
+  it('trusts forwarded metadata with the dynamic proxy flag and static authentication', async () => {
+    process.env.BROWSER_TRUST_PROXY = 'true';
+    process.env.BROWSER_WS_TOKEN = 'test-token';
+    const port = await start('invalid');
+    await expect(connect(port, {}, false, { 'X-Real-IP': '192.0.2.2' })).rejects.toThrow(/401/);
+    await connect(port, { token: 'test-token', connectionId: 'valid' }, false, { 'X-Real-IP': '192.0.2.2' });
+    await connect(port, { token: 'test-token', connectionId: 'invalid' }, false, { 'X-Real-IP': '192.0.2.2,203.0.113.9' });
+    expect(server!.listConnectionInfos().find((c) => c.connectionId === 'valid')).toMatchObject({ clientIp: '192.0.2.2', clientIpSource: 'x-real-ip' });
+    expect(server!.listConnectionInfos().find((c) => c.connectionId === 'invalid')).toMatchObject({ clientIp: '127.0.0.1', clientIpSource: 'socket' });
+  });
+
+  it('trusts the dynamic proxy flag with pairing authentication', async () => {
+    process.env.BROWSER_TRUST_PROXY = 'true';
+    process.env.BROWSER_ALLOW_PAIRING = 'true';
+    await start();
+    const token = createTokenStore(join(tempDir, 'tokens.json')).issueToken({ label: 'paired' });
+    // Use the same store instance as the server, whose tokens are held in memory.
+    await server!.close();
+    server = createWSServer({ port: 0, host: '127.0.0.1', tokenStore: createTokenStore(join(tempDir, 'tokens.json')) });
+    await connect(await serverPort(server), { token }, false, { 'X-Forwarded-For': '203.0.113.9, 192.0.2.2', 'X-Real-IP': '203.0.113.99' });
+    expect(server!.listConnectionInfos()[0]).toMatchObject({ clientIp: '192.0.2.2', clientIpSource: 'x-forwarded-for' });
+  });
+
+  it('ignores the dynamic proxy flag without authentication', async () => {
+    process.env.BROWSER_TRUST_PROXY = 'true';
+    const port = await start();
+    await connect(port, {}, false, { 'X-Real-IP': '192.0.2.2' });
+    expect(server!.listConnectionInfos()[0]).toMatchObject({ clientIp: '127.0.0.1', clientIpSource: 'socket' });
+  });
+
+  it('disables all trust when one configured entry is invalid', async () => {
+    const port = await start('127.0.0.1,invalid');
+    await connect(port, {}, false, { 'X-Real-IP': '192.0.2.2' });
+    expect(server!.listConnectionInfos()[0]).toMatchObject({ clientIp: '127.0.0.1', clientIpSource: 'socket' });
   });
 });
 

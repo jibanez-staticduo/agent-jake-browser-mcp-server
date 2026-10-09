@@ -101,9 +101,33 @@ working exactly as before.
 { "name": "browser_navigate", "arguments": { "url": "https://example.com", "connection": "chrome-office" } }
 ```
 
-`browser_list_connections` answers with the live browsers (id, label, user agent,
+`browser_list_connections` answers with the live browsers (id, label, client IP,
+socket peer IP, IP source, user agent,
 last activity and which one is active) and is answered by the server itself, so it
 also works while nothing is connected.
+
+The connections page displays the manual label first, then `IP <clientIp>`, then
+`Desconocido`. IP metadata is collected on the next browser reconnection and
+works with older extensions that send no label. An IP identifies the observed
+NAT/VPN egress, not a reliable hostname or a unique device.
+
+By default, IP metadata comes from the socket and forwarded headers are ignored.
+For a single trusted edge proxy such as Nginx Proxy Manager with dynamic addresses,
+set `BROWSER_TRUST_PROXY=true` and enable token or pairing authentication. This
+flag trusts forwarded metadata on authenticated connections without a fixed IP
+allowlist; it has no effect when authentication is disabled. Restrict the network
+and proxy path externally: an authenticated direct client holding a valid token
+can also supply this informational metadata when the flag is enabled. Forwarded
+IP is not an authentication identity. Alternatively, leave the flag off and set
+`BROWSER_TRUSTED_PROXY_IPS` to the proxy's actual socket IP. Ensure the proxy appends
+its observed client to `X-Forwarded-For` and overwrites `X-Real-IP` with
+`$remote_addr`. The rightmost IP in a valid single `X-Forwarded-For` header is
+preferred (Nginx's
+`$proxy_add_x_forwarded_for` appends its observed client); `X-Real-IP` is used only
+when `X-Forwarded-For` is absent. Malformed or duplicate
+headers fall back to the socket. This does not traverse multiple proxy hops.
+Keep the exact proxy address current when Docker networking changes. This
+metadata does not change authentication or browser routing.
 
 ### Environment
 
@@ -111,6 +135,8 @@ also works while nothing is connected.
 | --- | --- | --- |
 | `BROWSER_WS_HOST` | `127.0.0.1` | Bind address of the extension WebSocket. Set `0.0.0.0` when a reverse proxy reaches it from outside the container. |
 | `BROWSER_WS_PORT` | `8765` | Extension WebSocket port. |
+| `BROWSER_TRUST_PROXY` | `false` | Exact `true` trusts forwarded IP metadata on authenticated connections, taking priority over the IP allowlist. Requires static token or pairing authentication; enforce the trusted proxy/network path externally. |
+| `BROWSER_TRUSTED_PROXY_IPS` | empty | Comma-separated exact proxy IP literals (IPv4 or IPv6). No CIDR, hostnames or ports; any invalid entry disables the IP allowlist. |
 | `BROWSER_WS_TOKEN` | empty | Shared token required in the handshake (`?token=`). Empty disables static auth. |
 | `BROWSER_ALLOW_PAIRING` | `false` | `true` also accepts tokens issued by the pairing web. Auth is on when this or the static token is set. |
 | `BROWSER_TOKEN_STORE` | `/app/data/tokens.json` | JSON file where issued tokens live, so they survive a restart. Mount a volume for the path. |

@@ -99,6 +99,9 @@ export interface ToolResult {
 export interface BrowserConnectionInfo {
   connectionId: string;
   label: string;
+  clientIp?: string | null;
+  peerIp?: string | null;
+  clientIpSource?: 'socket' | 'x-real-ip' | 'x-forwarded-for';
   userAgent: string;
   connectedAt: number;
   lastActiveAt: number;
