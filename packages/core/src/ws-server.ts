@@ -54,7 +54,7 @@ export function parseHandshakeParams(reqUrl: string, hostHeader?: string): Hands
     return {
       token: url.searchParams.get('token'),
       connectionId: url.searchParams.get('connectionId'),
-      label: url.searchParams.get('label'),
+      label: url.searchParams.get('label')?.replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim().slice(0, 128) || null,
     };
   } catch {
     return { token: null, connectionId: null, label: null };

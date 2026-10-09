@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { WebSocket } from 'ws';
-import { createWSServer, type WSServer } from '../src/ws-server.js';
+import { createWSServer, parseHandshakeParams, type WSServer } from '../src/ws-server.js';
 import { createTokenStore } from '../src/token-store.js';
 import type { ExtensionMessage } from '../src/types.js';
 
@@ -113,6 +113,19 @@ describe('multi-connection registry', () => {
       host: '127.0.0.1',
       tokenStore: createTokenStore(join(tempDir, 'tokens.json')),
     });
+  });
+
+  it('normalizes incoming labels before storing them', async () => {
+    const port = await serverPort(server!);
+    await connect(port, { connectionId: 'labelled', label: '  Equipo\n\u0000\u007f\u0085 / navegador  ' });
+    expect(server!.listConnectionInfos()[0]!.label).toBe('Equipo / navegador');
+  });
+
+  it('limits labels and omits empty labels in handshake parsing', () => {
+    const query = new URLSearchParams({ label: '  ' + 'x'.repeat(200) + '  ' });
+    expect(parseHandshakeParams('/?' + query).label).toBe('x'.repeat(128));
+    expect(parseHandshakeParams('/?label=%00%0A%20').label).toBeNull();
+    expect(parseHandshakeParams('/').label).toBeNull();
   });
 
   it('does not log response payloads from the extension', async () => {

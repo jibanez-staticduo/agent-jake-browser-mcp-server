@@ -37,13 +37,42 @@ async function load() {
       box.textContent = 'Ninguna conexión abierta. Instala la extensión y páreala con un código.';
       return;
     }
-    const rows = data.connections.map((c) => '<tr><td><code>' + c.connectionId + '</code></td><td>' +
-      (c.label || '') + '</td><td>' + (c.open ? 'abierta' : 'cerrada') + '</td><td>' +
-      Math.round(c.secondsSinceLastActivity) + 's</td><td>' + (c.active ? '<span class="badge active">activa</span>' : '') +
-      '</td></tr>').join('');
-    box.innerHTML = '<table><thead><tr><th>connectionId</th><th>label</th><th>estado</th><th>última actividad</th><th></th></tr></thead><tbody>' +
-      rows + '</tbody></table><p class="muted">Auth: ' + (data.authEnabled ? 'token requerido' : 'sin token') +
-      ' · WS: <code>' + data.wsUrl + '</code></p>';
+    const element = (tag, text) => {
+      const node = document.createElement(tag);
+      if (text !== undefined) node.textContent = text;
+      return node;
+    };
+    const table = element('table');
+    const head = element('thead');
+    const headings = element('tr');
+    for (const title of ['connectionId', 'Equipo / navegador', 'estado', 'última actividad', '']) {
+      headings.appendChild(element('th', title));
+    }
+    head.appendChild(headings);
+    table.appendChild(head);
+    const body = element('tbody');
+    for (const c of data.connections) {
+      const row = element('tr');
+      const id = element('td');
+      id.appendChild(element('code', c.connectionId));
+      row.appendChild(id);
+      row.appendChild(element('td', c.label || ''));
+      row.appendChild(element('td', c.open ? 'abierta' : 'cerrada'));
+      row.appendChild(element('td', Math.round(c.secondsSinceLastActivity) + 's'));
+      const active = element('td');
+      if (c.active) {
+        const badge = element('span', 'activa');
+        badge.className = 'badge active';
+        active.appendChild(badge);
+      }
+      row.appendChild(active);
+      body.appendChild(row);
+    }
+    table.appendChild(body);
+    const status = element('p', 'Auth: ' + (data.authEnabled ? 'token requerido' : 'sin token') + ' · WS: ');
+    status.className = 'muted';
+    status.appendChild(element('code', data.wsUrl));
+    box.replaceChildren(table, status);
   } catch (err) {
     box.textContent = 'No se pudo leer /connections: ' + err;
   }
