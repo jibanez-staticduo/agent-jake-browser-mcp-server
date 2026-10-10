@@ -15,7 +15,7 @@ import { WebSocket } from 'ws';
 import AdmZip from 'adm-zip';
 import { configEntryName, extensionConfigJson, patchZipConfig } from '../src/extension-zip.ts';
 
-const repoRoot = dirname(fileURLToPath(new URL('.', import.meta.url)));
+const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
 
 const basePort = 21500 + Math.floor(Math.random() * 300) * 4;
 const httpPort = basePort;
@@ -78,11 +78,13 @@ async function startServer(options: {
     BROWSER_ALLOW_PAIRING: 'true',
     BROWSER_TOKEN_STORE: options.tokenStore,
     BROWSER_EXTENSION_ZIP: options.zipPath,
+    AGENT_BROWSER_TAB_IDLE_MINUTES: '60',
   };
   delete env.BROWSER_PUBLIC_WS_URL;
+  delete env.AGENT_BROWSER_FILL_SECRET_ENABLED;
   if (options.publicWsUrl) env.BROWSER_PUBLIC_WS_URL = options.publicWsUrl;
 
-  const child = spawn(process.execPath, ['--import', 'tsx', 'http-server.js'], {
+  const child = spawn(process.execPath, ['dist/http-server.js'], {
     cwd: repoRoot,
     stdio: ['ignore', 'pipe', 'pipe'],
     env,
@@ -151,9 +153,32 @@ function mcpPayload(text: string): any {
   return dataLine ? JSON.parse(dataLine.slice('data:'.length).trim()) : null;
 }
 
-async function mcpCall(name: string, args: Record<string, unknown>): Promise<any> {
+async function openMcpSession(server: RunningServer): Promise<string> {
+  const init = await request(server, 'POST', '/mcp', {
+    headers: { accept: 'application/json, text/event-stream' },
+    body: {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'vitest', version: '1' },
+      },
+    },
+  });
+  const id = init.headers.get('mcp-session-id');
+  expect(id, JSON.stringify(init.json)).toBeTruthy();
+  await request(server, 'POST', '/mcp', {
+    headers: { accept: 'application/json, text/event-stream', 'mcp-session-id': id! },
+    body: { jsonrpc: '2.0', method: 'notifications/initialized' },
+  });
+  return id!;
+}
+
+async function mcpCall(name: string, args: Record<string, unknown>, session = sessionId): Promise<any> {
   const res = await request(primary, 'POST', '/mcp', {
-    headers: { accept: 'application/json, text/event-stream', 'mcp-session-id': sessionId! },
+    headers: { accept: 'application/json, text/event-stream', 'mcp-session-id': session! },
     body: { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name, arguments: args } },
   });
   return mcpPayload(res.text)?.result ?? mcpPayload(res.text)?.error;
@@ -171,6 +196,7 @@ function connectExtension(
   token: string,
   connectionId: string,
   label?: string,
+  answer: (message: Record<string, unknown>) => unknown = () => 'paged',
 ): Promise<FakeExtension> {
   const query = new URLSearchParams({ token, connectionId });
   if (label) query.set('label', label);
@@ -179,7 +205,7 @@ function connectExtension(
   socket.on('message', (data) => {
     const message = JSON.parse(data.toString()) as Record<string, unknown>;
     messages.push(message);
-    socket.send(JSON.stringify({ id: message.id, success: true, result: 'paged' }));
+    socket.send(JSON.stringify({ id: message.id, success: true, result: answer(message) }));
   });
   return new Promise((resolve, reject) => {
     socket.on('error', reject);
@@ -218,7 +244,8 @@ describe('tools/list annotation', () => {
     });
     expect(res.status).toBe(200);
     const tools = res.json.result.tools as Array<{ name: string; inputSchema: any }>;
-    expect(tools.length).toBeGreaterThan(20);
+    expect(tools).toHaveLength(39);
+    expect(tools.map((t) => t.name)).not.toContain('browser_fill_secret');
     expect(tools.map((t) => t.name)).toContain('browser_list_connections');
     for (const tool of tools) {
       expect(tool.inputSchema.properties.connection, tool.name).toEqual({
@@ -325,26 +352,7 @@ describe('browser connections over the running server', () => {
 
 describe('tools/call through an MCP session', () => {
   beforeAll(async () => {
-    const init = await request(primary, 'POST', '/mcp', {
-      headers: { accept: 'application/json, text/event-stream' },
-      body: {
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'initialize',
-        params: {
-          protocolVersion: '2025-06-18',
-          capabilities: {},
-          clientInfo: { name: 'vitest', version: '1' },
-        },
-      },
-    });
-    sessionId = init.headers.get('mcp-session-id');
-    expect(sessionId, JSON.stringify(init.json)).toBeTruthy();
-
-    await request(primary, 'POST', '/mcp', {
-      headers: { accept: 'application/json, text/event-stream', 'mcp-session-id': sessionId! },
-      body: { jsonrpc: '2.0', method: 'notifications/initialized' },
-    });
+    sessionId = await openMcpSession(primary);
   }, 30000);
 
   it('lists connections without a browser and without waiting for one', async () => {
@@ -365,6 +373,8 @@ describe('tools/call through an MCP session', () => {
     });
     expect(result.isError).toBeUndefined();
     expect(extension.messages).toHaveLength(1);
+    expect(Object.keys(extension.messages[0]).sort()).toEqual(['id', 'payload', 'type']);
+    expect(extension.messages[0].id).toEqual(expect.any(String));
     expect(extension.messages[0]).toMatchObject({
       type: 'browser_navigate',
       payload: { url: 'https://example.com' },
@@ -386,6 +396,92 @@ describe('tools/call through an MCP session', () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('browser_list_connections');
   });
+});
+
+describe('agent tabs when the MCP session ends', () => {
+  it('pins the initially active browser for each session even when another becomes active', async () => {
+    const a = await connectExtension(primary, pairedToken, 'stable-a');
+    const b = await connectExtension(primary, pairedToken, 'stable-b');
+    const first = await openMcpSession(primary);
+    const second = await openMcpSession(primary);
+    try {
+      const initial = await mcpCall('browser_reload', {}, first);
+      expect(initial.isError).toBeUndefined();
+      expect(a.messages).toHaveLength(0);
+      expect(b.messages).toHaveLength(1);
+      await mcpCall('browser_reload', { connection: 'stable-a' }, second);
+      await Promise.all([
+        mcpCall('browser_reload', {}, first),
+        mcpCall('browser_reload', {}, second),
+      ]);
+      expect(a.messages).toHaveLength(2);
+      expect(b.messages).toHaveLength(2);
+    } finally {
+      a.socket.close();
+      b.socket.close();
+      await request(primary, 'DELETE', '/mcp', { headers: { 'mcp-session-id': first } });
+      await request(primary, 'DELETE', '/mcp', { headers: { 'mcp-session-id': second } });
+    }
+  });
+
+  it('refuses a manual close by ID on a legacy extension before any close is sent', async () => {
+    const extension = await connectExtension(primary, pairedToken, 'legacy-close', undefined, () => []);
+    const session = await openMcpSession(primary);
+    try {
+      const result = await mcpCall('browser_close_tab', { connection: 'legacy-close', tabId: 99 }, session);
+      expect(result.isError).toBe(true);
+      expect(extension.messages.map((message) => message.type)).toEqual(['browser_list_tabs']);
+      const invalid = await mcpCall('browser_close_tab', { connection: 'legacy-close', tabId: 0 }, session);
+      expect(invalid.isError).toBe(true);
+      expect(extension.messages).toHaveLength(1);
+    } finally {
+      extension.socket.close();
+      await request(primary, 'DELETE', '/mcp', { headers: { 'mcp-session-id': session } });
+    }
+  });
+
+  it('closes the tab the session opened and keeps the one it was asked to hold', async () => {
+    const tabs = new Map<number, string>([[1, 'https://user.example/']]);
+    let next = 40;
+    const extension = await connectExtension(primary, pairedToken, 'chrome-tabs', undefined, (message) => {
+      const payload = (message.payload ?? {}) as Record<string, unknown>;
+      switch (message.type) {
+        case 'browser_new_tab': {
+          const id = next++;
+          tabs.set(id, String(payload.url));
+          return { tab: { id, url: payload.url, connected: true } };
+        }
+        case 'browser_list_tabs':
+          return { tabs: [...tabs].map(([id, url]) => ({ id, url, title: '', active: false, connected: false })), closeById: true };
+        case 'browser_close_tab':
+          tabs.delete(payload.tabId as number);
+          return { closed: true, tabId: payload.tabId };
+        default:
+          return {};
+      }
+    });
+    const session = await openMcpSession(primary);
+
+    const opened = await mcpCall('browser_new_tab', { url: 'https://shop.example/', connection: 'chrome-tabs' }, session);
+    expect(opened.content[0].text).toContain('(id: 40)');
+    const held = await mcpCall(
+      'browser_new_tab',
+      { url: 'https://shop.example/checkout', keepOpenMinutes: 60, connection: 'chrome-tabs' },
+      session,
+    );
+    expect(held.isError).toBeUndefined();
+    const sentNewTab = extension.messages.filter((m) => m.type === 'browser_new_tab');
+    expect(JSON.stringify(sentNewTab)).not.toContain('keepOpenMinutes');
+
+    const closed = await request(primary, 'DELETE', '/mcp', { headers: { 'mcp-session-id': session } });
+    expect(closed.status).toBe(200);
+
+    await expect
+      .poll(() => extension.messages.filter((m) => m.type === 'browser_close_tab').map((m) => (m.payload as any).tabId))
+      .toEqual([40]);
+    expect([...tabs.keys()].sort()).toEqual([1, 41]);
+    extension.socket.close();
+  }, 30000);
 });
 
 describe('download without BROWSER_PUBLIC_WS_URL', () => {

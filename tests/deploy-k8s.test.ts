@@ -94,7 +94,7 @@ describe('environment documentation', () => {
     // Drift here is silent and expensive: an operator deploying from the README
     // cannot configure a variable nobody wrote down.
     const sources = ['http-server.js', 'healthcheck.js'];
-    const srcDir = join(import.meta.dirname, '..', 'src');
+    const srcDir = join(import.meta.dirname, '..', 'packages', 'core', 'src');
     const walk = (dir: string): string[] =>
       readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
         entry.isDirectory()

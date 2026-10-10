@@ -26,6 +26,13 @@ This server implements the MCP protocol to expose browser automation tools to AI
 
 ## Installation
 
+The root Dockerfile builds the compiled canonical core and includes the verified
+1Password CLI. Docker Compose reads configuration from each installation's `.env`;
+Kubernetes uses the example [manifests](deploy/k8s/README.md). Both use the same
+image and environment contract. Never expose the unauthenticated MCP endpoint
+without the installation's existing network/authentication boundary.
+
+
 ```bash
 git clone https://github.com/SnakeO/agent-jake-browser-mcp-server.git
 cd agent-jake-browser-mcp-server
@@ -65,26 +72,18 @@ Add to your MCP settings:
 }
 ```
 
-### On Kubernetes
+### Infrastructure
 
-The server also runs as a pod, with the browser staying on your own machine —
-useful when the agents that drive it already live in the cluster. Manifests and
-the security contract that comes with them are in
-[`deploy/k8s/`](deploy/k8s/README.md):
+Docker recipes, healthchecks and Kubernetes manifests belong to the house
+infrastructure repository. StaticDuo's extraction destination is
+`nas-docker/mcp/agent-jake-browser/`; its `migration-source.json` records hashes
+of the infrastructure copied from server SHA `846dab66`.
 
-```bash
-docker build -t <registry>/agent-jake-browser-mcp-server:<tag> .
-# edit deploy/k8s/kustomization.yaml, configmap.yaml, ingress.yaml
-kubectl apply -k deploy/k8s
-```
-
-Agents then reach it over streamable HTTP at
-`http://agent-jake-browser.agent-jake-browser.svc:8000/mcp`, and browsers pair
-from wherever they are.
-
-One thing not to skip: in a pod the MCP endpoint cannot bind loopback, which is
-the only thing protecting it on a laptop. `deploy/k8s/networkpolicy.yaml`
-replaces that boundary and is part of the deployment, not an optional extra.
+Build this product with `npm ci && npm run build`. Infrastructure consumes the
+root artifacts `dist/index.js` (stdio) and `dist/http-server.js` (HTTP).
+The compatibility command `node http-server.js` also runs compiled HTTP.
+The HTTP listener defaults to loopback; a deployment that changes the bind host
+must provide its own authenticated proxy and network boundary.
 
 ### CLI Options
 
@@ -109,9 +108,33 @@ working exactly as before.
 { "name": "browser_navigate", "arguments": { "url": "https://example.com", "connection": "chrome-office" } }
 ```
 
-`browser_list_connections` answers with the live browsers (id, label, user agent,
+`browser_list_connections` answers with the live browsers (id, label, client IP,
+socket peer IP, IP source, user agent,
 last activity and which one is active) and is answered by the server itself, so it
 also works while nothing is connected.
+
+The connections page displays the manual label first, then `IP <clientIp>`, then
+`Desconocido`. IP metadata is collected on the next browser reconnection and
+works with older extensions that send no label. An IP identifies the observed
+NAT/VPN egress, not a reliable hostname or a unique device.
+
+By default, IP metadata comes from the socket and forwarded headers are ignored.
+For a single trusted edge proxy such as Nginx Proxy Manager with dynamic addresses,
+set `BROWSER_TRUST_PROXY=true` and enable token or pairing authentication. This
+flag trusts forwarded metadata on authenticated connections without a fixed IP
+allowlist; it has no effect when authentication is disabled. Restrict the network
+and proxy path externally: an authenticated direct client holding a valid token
+can also supply this informational metadata when the flag is enabled. Forwarded
+IP is not an authentication identity. Alternatively, leave the flag off and set
+`BROWSER_TRUSTED_PROXY_IPS` to the proxy's actual socket IP. Ensure the proxy appends
+its observed client to `X-Forwarded-For` and overwrites `X-Real-IP` with
+`$remote_addr`. The rightmost IP in a valid single `X-Forwarded-For` header is
+preferred (Nginx's
+`$proxy_add_x_forwarded_for` appends its observed client); `X-Real-IP` is used only
+when `X-Forwarded-For` is absent. Malformed or duplicate
+headers fall back to the socket. This does not traverse multiple proxy hops.
+Keep the exact proxy address current when Docker networking changes. This
+metadata does not change authentication or browser routing.
 
 ### Environment
 
@@ -119,6 +142,8 @@ also works while nothing is connected.
 | --- | --- | --- |
 | `BROWSER_WS_HOST` | `127.0.0.1` | Bind address of the extension WebSocket. Set `0.0.0.0` when a reverse proxy reaches it from outside the container. |
 | `BROWSER_WS_PORT` | `8765` | Extension WebSocket port. |
+| `BROWSER_TRUST_PROXY` | `false` | Exact `true` trusts forwarded IP metadata on authenticated connections, taking priority over the IP allowlist. Requires static token or pairing authentication; enforce the trusted proxy/network path externally. |
+| `BROWSER_TRUSTED_PROXY_IPS` | empty | Comma-separated exact proxy IP literals (IPv4 or IPv6). No CIDR, hostnames or ports; any invalid entry disables the IP allowlist. |
 | `BROWSER_WS_TOKEN` | empty | Shared token required in the handshake (`?token=`). Empty disables static auth. |
 | `BROWSER_ALLOW_PAIRING` | `false` | `true` also accepts tokens issued by the pairing web. Auth is on when this or the static token is set. |
 | `BROWSER_TOKEN_STORE` | `/app/data/tokens.json` | JSON file where issued tokens live, so they survive a restart. Mount a volume for the path. |
@@ -126,9 +151,13 @@ also works while nothing is connected.
 | `BROWSER_PUBLIC_WS_URL` | derived | Full `ws(s)://host/path` handed to the extension. Use it when the proxy mapping is not derivable from the request. |
 | `BROWSER_WS_PATH` | `/` | Path advertised to the extension, for proxies that map the socket to a subpath. |
 | `MCP_HTTP_HOST` / `MCP_HTTP_PORT` | `127.0.0.1` / `8000` | MCP streamable HTTP endpoint. |
+| `AGENT_BROWSER_TAB_IDLE_MINUTES` | `60` | HTTP mode: tabs an MCP session opened close when that session ends or after this many minutes without use; `0` turns it off. `keepOpenMinutes` on `browser_new_tab` / `browser_switch_tab` holds one longer. Needs an extension that announces `closeById`. |
 | `BROWSER_PUBLIC_ORIGIN` | derived | Origin used to build the approval link returned by `/pair/start`. Set it when the proxy host is not derivable from the request. |
 | `AGENT_BROWSER_OUT_DIR` | system temp dir | Where `browser_pdf` and tool results saved with `filename` write their files. |
 | `AGENT_BROWSER_DROP_DIR` | unset (file drops disabled) | Directory of files available to `browser_drop`. Files must be direct children, with no symlinks; maximum 8 files and 10 MiB total per call. Mount only files intended for browser upload. MIME data-only drops remain available with a 1 MiB limit. |
+| `AGENT_BROWSER_OP_BIN` | `op` | Configurable reader implementing `<bin> read <ref>`. |
+| `AGENT_BROWSER_OP_BACKEND` | unset (environment as is) | `connect` or `service-account`; credentials come from deployment environment. |
+| `AGENT_BROWSER_FILL_SECRET_ENABLED` | unset (OFF) | Only the exact value `true` permits discovery and execution of `browser_fill_secret`. Enable after validating that the installed extension preserves the secret flag, redacts logs, and returns `{ typed: true, verified: true }`. |
 | `AGENT_BROWSER_ALLOW_UNSAFE_CODE` | unset (disabled) | Set exactly `1` to enable `browser_run_code_unsafe`, which executes arbitrary JavaScript in the MCP server process. Only use it with fully trusted MCP clients. |
 
 PDFs and network or console results written with a path must be direct children of
@@ -175,6 +204,20 @@ The template mounted at `BROWSER_EXTENSION_ZIP` stays read-only and untouched; t
 patched archive is built in memory and cached until the template or the URL changes.
 Without `BROWSER_PUBLIC_WS_URL` the template is served byte for byte, and no token is
 ever written into the archive — authentication comes from pairing.
+
+## Agent tab lifetime
+
+HTTP sessions track only tabs they opened. `AGENT_BROWSER_TAB_IDLE_MINUTES` is
+60 by default; `0` disables cleanup. `keepOpenMinutes` on new/switch tab retains
+a tracked tab for up to 1440 minutes. User-created tabs are never adopted merely
+by switching to them. Automatic and explicit closing by ID require an extension
+that announces `closeById` and echoes the closed ID; legacy extensions fail closed.
+Reconnects invalidate ownership, so old tabs remain open rather than risking an
+ID reused by Chrome. Shared tabs remain tracked while a participating MCP session
+is live, until all participants end or the idle timeout expires. While cleanup
+awaits a close acknowledgement, new commands on that browser are rejected for
+retry instead of adopting a tab being closed. Browser selection is pinned per MCP session after its first
+call; an explicit `connection` argument changes that session's target.
 
 ## Tools
 
@@ -273,25 +316,40 @@ npm run typecheck
 
 ## Project Structure
 
+```text
+packages/
+  core/
+    src/
+      product.ts       # Importable API; no listener starts on import
+      cli/             # Compiled stdio and HTTP process entrypoints
+      http/            # HTTP routes and existing pairing/download pages
+      server.ts        # MCP server
+      context.ts       # Browser communication
+      ws-server.ts     # WebSocket authentication and routing
+      tools/           # Shared tools and pinned-directory safeguards
+      utils/           # Shared utilities
+    tests/             # Product tests, including HTTP process integration
+  house-staticduo/     # Identity and composition only
+  house-pocharlies/    # Identity and composition only
+tests/integration/    # Browser E2E; extension artifact supplied by configuration
+entrypoints/          # Root dist compatibility wrappers
 ```
-src/
-├── index.ts           # Entry point
-├── server.ts          # MCP server implementation
-├── context.ts         # Extension communication context
-├── ws-server.ts       # WebSocket server for extension
-├── types.ts           # TypeScript type definitions
-├── tools/             # Tool implementations
-│   ├── index.ts       # Tool registry
-│   ├── navigation.ts  # Navigate, back, forward, reload
-│   ├── snapshot.ts    # ARIA snapshot
-│   ├── interaction.ts # Click, type, hover, drag
-│   ├── queries.ts     # Get text, attributes, visibility
-│   ├── tabs.ts        # Tab management
-│   └── utility.ts     # Wait, screenshot, console logs
-└── utils/             # Utilities
-    ├── logger.ts      # Logging
-    └── port.ts        # Port management
+
+The root owns the only lockfile. `npm ci`, `npm run typecheck`, `npm test`,
+`npm run build`, `npm start` and `npm run dev` remain root commands.
+The two house packages compose the same core; they contain no tool copies,
+domains, credentials or deployment configuration.
+
+Browser integration uses an unpacked extension artifact supplied through
+`BROWSER_EXTENSION_PATH` (default `./test-artifacts/extension`). It never
+requires a neighboring checkout. Example after building the server:
+
+```sh
+BROWSER_EXTENSION_PATH=/path/to/pinned/extension npm run test:e2e
 ```
+
+See [migration inventory](docs/migration-inventory.md) and the
+[current wire contract](docs/contracts/browser-harness-v1.md).
 
 ## Tech Stack
 
@@ -309,3 +367,47 @@ src/
 ## License
 
 MIT - See [LICENSE](LICENSE)
+
+## 1Password
+
+`browser_fill_secret` reads `op://vault/item/field` with the 1Password CLI (`op read`) on the server
+machine and types it with `browser_type`, flagged `secret`. The server omits the value from this tool's
+result and does not forward reader stderr or browser/transport error text. Diagnostics omit the
+secret reference, target selector and secret length; success requires boolean `success: true`,
+`typed: true` and `verified: true`. This is not a guarantee against reading the page with another tool.
+
+Use only an extension that preserves `secret` and redacts both request and response logs. Legacy
+extensions may discard the flag and log the typed value; installing this server alone does not fix
+their behavior. Selector-only targeting also requires a compatible extension; older versions require
+an element `ref`. Verify the paired extension before enabling secret fills in an installation.
+
+The packaging installer `scripts/install-op.sh` supports 1Password CLI 2.39.0 for linux/amd64 and linux/arm64. Builds select the effective
+target architecture and verify pinned archive hashes before installing or executing the CLI. An
+incompatible explicit `TARGETARCH`, unsupported architecture or unverified `OP_VERSION` fails the build.
+Cross-platform builds need native builder nodes or emulation for each target platform.
+
+Pick the backend with `AGENT_BROWSER_OP_BACKEND`:
+
+- `service-account`: requires a nonblank `OP_SERVICE_ACCOUNT_TOKEN`, without silently falling back to a desktop login. On Families and Teams plans every service account of the
+  account shares one daily request quota (1,000 a day on Families), so an agent that logs in often can
+  exhaust it for everything else that uses 1Password.
+- `connect`: a [1Password Connect](https://developer.1password.com/docs/connect/) server
+  (`OP_CONNECT_HOST`, `OP_CONNECT_TOKEN`). Connect keeps a local copy of the vaults it is granted and only
+  spends quota on its own sync, so reads are unlimited.
+
+With Connect, `op read` works, TOTP included (`op://vault/item/<OTP field id>?attribute=otp`), but the CLI
+refuses `op item list` and needs `--vault` plus `--format json` for `op item get`. Connect matches a
+field reference by its **label**, so a field with no label cannot be read. Strip the trailing newline
+from the token printed by `op connect token create` before storing it, or the Authorization header breaks.
+
+
+Secret fills are disabled by default. Only the exact value
+`AGENT_BROWSER_FILL_SECRET_ENABLED=true` registers `browser_fill_secret` in HTTP
+and stdio. Keep it disabled until every target extension preserves the secret
+flag, redacts request and response logs, and acknowledges successful fills with
+`{ typed: true, verified: true }`. Missing acknowledgements, failed verification,
+and warnings return a fixed error without reflecting the remote payload.
+
+`AGENT_BROWSER_OP_BIN` defaults to `op` and must implement `<bin> read <ref>`.
+`AGENT_BROWSER_OP_BACKEND` unset preserves the reader environment; it does not
+enable the tool. Configure `connect` or `service-account` as described above.

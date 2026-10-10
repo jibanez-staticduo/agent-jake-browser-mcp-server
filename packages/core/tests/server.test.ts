@@ -186,7 +186,9 @@ describe('Tool Result Formatting', () => {
 
 describe('Background tab behavior', () => {
   const mockContext = () => ({
-    send: vi.fn().mockResolvedValue({ success: true, result: { tabId: 42 } }),
+    send: vi.fn().mockResolvedValue({ success: true, result: { tab: {
+      id: 42, url: 'https://example.com', title: 'Example', active: false, connected: true,
+    } } }),
     isConnected: () => true,
   });
 

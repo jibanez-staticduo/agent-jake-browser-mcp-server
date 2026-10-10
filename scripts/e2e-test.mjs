@@ -8,7 +8,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const EXTENSION_PATH = path.join(__dirname, '..', '..', 'agent-jake-browser-mcp-extension', 'dist');
+const EXTENSION_PATH = path.resolve(process.env.BROWSER_EXTENSION_PATH || './test-artifacts/extension');
 const SERVER_PATH = path.join(__dirname, '..', 'dist', 'index.js');
 
 let requestId = 1;

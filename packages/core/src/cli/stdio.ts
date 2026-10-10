@@ -3,9 +3,9 @@
  */
 import { program } from 'commander';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { createServer } from './server.js';
-import { logger, setLogLevel } from './utils/logger.js';
-import { isPortAvailable, killProcessOnPort, waitForPort } from './utils/port.js';
+import { createServer } from '../server.js';
+import { logger, setLogLevel } from '../utils/logger.js';
+import { isPortAvailable, killProcessOnPort, waitForPort } from '../utils/port.js';
 
 const DEFAULT_PORT = 8765;
 

@@ -98,7 +98,12 @@ export interface ToolResult {
  */
 export interface BrowserConnectionInfo {
   connectionId: string;
+  /** Unique for each socket, including reconnects within the same millisecond. */
+  connectionEpoch?: string;
   label: string;
+  clientIp?: string | null;
+  peerIp?: string | null;
+  clientIpSource?: 'socket' | 'x-real-ip' | 'x-forwarded-for';
   userAgent: string;
   connectedAt: number;
   lastActiveAt: number;
