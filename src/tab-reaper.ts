@@ -6,8 +6,8 @@
  * tracked and never closed.
  *
  * An agent tab closes when either:
- *   - its MCP session ends (DELETE /mcp, transport closed), or
- *   - it has gone `idleMs` without use: no call targeted it and its session made no call.
+ *   - all MCP sessions using it end (DELETE /mcp, transport closed), or
+ *   - it has gone `idleMs` without use: no call targeted it and no participating session made a call.
  * `keepOpenMinutes` on browser_new_tab / browser_switch_tab holds it open until then, for a
  * tab that waits on a person (a payment ready for a human to confirm) after its session is gone.
  *
@@ -28,6 +28,7 @@ interface TrackedTab {
   connectionId: string;
   tabId: number;
   sessionId: string;
+  participants: Set<string>;
   lastUsed: number;
   keepUntil: number;
   url: string;
@@ -107,6 +108,7 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
   const inFlight = new Map<string, number>();
   const activeSessions = new Map<string, number>();
   const closedSessions = new Set<string>();
+  const closing = new Set<string>();
 
   const connectedAtOf = (connectionId: string) =>
     options.listConnections().find((c) => c.connectionId === connectionId)?.connectedAt ?? 0;
@@ -127,6 +129,8 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
     const tab = tabs.get(key(connectionId, tabId));
     if (!tab) return;
     tab.lastUsed = now();
+    if (closedSessions.has(sessionId)) return;
+    tab.participants.add(sessionId);
     if (tab.sessionClosed && tab.sessionId !== sessionId) {
       // Its session is gone and another one works in it (e.g. the step that confirms a held payment):
       // the tab is now that session's, and closes when that one ends.
@@ -141,6 +145,7 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
       connectionId,
       tabId,
       sessionId,
+      participants: new Set(closedSessions.has(sessionId) ? [] : [sessionId]),
       lastUsed: now(),
       keepUntil: 0,
       url,
@@ -201,6 +206,12 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
     return {
       ...context,
       send: async (type, payload = {}, ...rest) => {
+        if (closing.has(connectionId)) {
+          return { id: '', success: false, error: {
+            code: 'TAB_CLEANUP_IN_PROGRESS',
+            message: 'A tab is being closed on this browser. Retry after cleanup finishes.',
+          } };
+        }
         const epoch = epochOf(connectionId);
         if ([...tabs.values()].some((tab) => tab.connectionId === connectionId && tab.connectionEpoch !== epoch)) {
           invalidate(connectionId);
@@ -233,7 +244,7 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
   function touchSession(sessionId: string | undefined) {
     if (!sessionId) return;
     const t = now();
-    for (const tab of tabs.values()) if (tab.sessionId === sessionId) tab.lastUsed = t;
+    for (const tab of tabs.values()) if (tab.participants.has(sessionId)) tab.lastUsed = t;
   }
 
   function keep(connectionId: string | undefined, tabId: number, minutes: number) {
@@ -246,7 +257,7 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
   }
 
   const isDue = (tab: TrackedTab, t: number) =>
-    t >= tab.keepUntil && (tab.sessionClosed || t - tab.lastUsed >= options.idleMs);
+    t >= tab.keepUntil && (tab.participants.size === 0 || t - tab.lastUsed >= options.idleMs);
 
   async function closeTab(tab: TrackedTab): Promise<boolean> {
     const answer = await options.send(tab.connectionId, 'browser_close_tab', { tabId: tab.tabId }).catch(
@@ -301,12 +312,20 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
       };
       if (url === undefined) {
         forget(); // already gone
-      } else if (!inFlight.has(connection.connectionId) && !activeSessions.has(tab.sessionId) && isDue(tab, now())) {
+      } else if (!inFlight.has(connection.connectionId) &&
+        ![...tab.participants].some((sessionId) => activeSessions.has(sessionId)) &&
+        !activeSessions.has(tab.sessionId) && isDue(tab, now())) {
         // Stays tracked: it closes once the browser runs a build that can.
         if (!announced || unsafe.has(tab.connectionId)) continue;
-        if (await closeTab(tab)) {
-          closed++;
-          if (tabs.get(key(tab.connectionId, tab.tabId)) === tab) forget();
+        // Keep the guard until ownership is forgotten, including the close acknowledgement.
+        closing.add(connection.connectionId);
+        try {
+          if (await closeTab(tab)) {
+            closed++;
+            if (tabs.get(key(tab.connectionId, tab.tabId)) === tab) forget();
+          }
+        } finally {
+          closing.delete(connection.connectionId);
         }
       } else {
         tab.url = url;
@@ -329,7 +348,7 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
       }
     }
     for (const sessionId of closedSessions) {
-      if (!activeSessions.has(sessionId) && ![...tabs.values()].some((tab) => tab.sessionId === sessionId)) {
+      if (!activeSessions.has(sessionId) && ![...tabs.values()].some((tab) => tab.sessionId === sessionId || tab.participants.has(sessionId))) {
         closedSessions.delete(sessionId);
       }
     }
@@ -344,11 +363,12 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
   }
 
   async function sessionClosed(sessionId: string) {
-    if (activeSessions.has(sessionId) || [...tabs.values()].some((tab) => tab.sessionId === sessionId)) {
+    if (activeSessions.has(sessionId) || [...tabs.values()].some((tab) => tab.sessionId === sessionId || tab.participants.has(sessionId))) {
       closedSessions.add(sessionId);
     }
     let any = false;
     for (const tab of tabs.values()) {
+      if (tab.participants.delete(sessionId)) any = true;
       if (tab.sessionId === sessionId) {
         tab.sessionClosed = true;
         any = true;

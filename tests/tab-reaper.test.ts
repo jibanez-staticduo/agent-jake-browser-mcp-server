@@ -410,6 +410,59 @@ describe('tab reaper', () => {
     fail = false;
     expect(await reaper.sweep()).toBe(1);
   });
+
+  it('rejects new activity while a close acknowledgement is pending without adopting the closing tab', async () => {
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
+    let acknowledge!: () => void;
+    let closingStarted!: () => void;
+    const started = new Promise<void>((resolve) => { closingStarted = resolve; });
+    const original = browser.send.bind(browser);
+    browser.send = async (type, payload) => {
+      if (type === 'browser_close_tab') {
+        closingStarted();
+        await new Promise<void>((resolve) => { acknowledge = resolve; });
+      }
+      return original(type, payload);
+    };
+    const pending = reaper.sessionClosed('s1');
+    await started;
+    const attempted = await call('s2', 'browser_snapshot');
+    expect(attempted.success).toBe(false);
+    expect(attempted.error?.code).toBe('TAB_CLEANUP_IN_PROGRESS');
+    expect(browser.sent.some((message) => message.type === 'browser_snapshot')).toBe(false);
+    expect(reaper.tracked()[0]?.sessionId).toBe('s1');
+    expect([...reaper.tracked()[0]!.participants]).toEqual([]);
+    acknowledge();
+    await pending;
+    expect(reaper.tracked()).toHaveLength(0);
+    expect(browser.tabs.has(100)).toBe(false);
+    expect((await call('s2', 'browser_snapshot')).success).toBe(true);
+  });
+
+  it.each([['s1', 's2'], ['s2', 's1']])('keeps a shared tab when %s ends until %s also ends', async (first, last) => {
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
+    await call('s2', 'browser_switch_tab', { tabId: 100 });
+    await reaper.sessionClosed(first);
+    expect(browser.tabs.has(100)).toBe(true);
+    expect(browser.closes()).toEqual([]);
+    expect([...reaper.tracked()[0]!.participants]).toEqual([last]);
+    await reaper.sessionClosed(last);
+    expect(browser.closes()).toEqual([100]);
+    expect(browser.tabs.has(1)).toBe(true);
+  });
+
+  it('counts activity from a remaining participant and still expires shared tabs at the idle timeout', async () => {
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
+    await call('s2', 'browser_switch_tab', { tabId: 100 });
+    await reaper.sessionClosed('s1');
+    clock = HOUR - 1;
+    reaper.touchSession('s2');
+    clock = HOUR;
+    expect(await reaper.sweep()).toBe(0);
+    clock = 2 * HOUR - 1;
+    expect(await reaper.sweep()).toBe(1);
+    expect(browser.tabs.has(1)).toBe(true);
+  });
 });
 
 describe('idleMinutesFromEnv', () => {
