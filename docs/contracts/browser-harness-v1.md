@@ -56,3 +56,16 @@ house packages.
 
 Pinned-directory file safety and unsafe-code defaults remain shared product
 behavior. This extraction does not change their platform guarantees.
+
+## HTTP session and tab lifetime extension
+
+The first HTTP browser call resolves the explicit connection, or the existing
+active/single-browser choice, then pins the chosen browser to that MCP session.
+An explicit connection changes its subsequent target. Calls cannot cross a socket
+replacement midway through one operation.
+
+Only tabs opened by a session are tracked for cleanup. Closing by ID requires
+`closeById: true` in the tab listing and an exact echoed ID. Old extension builds
+fail closed. Ownership is discarded after every socket reconnection because tab
+IDs and URLs cannot prove browser-session identity. Secret fills remain disabled
+unless explicitly enabled, and require verified boolean acknowledgements.
