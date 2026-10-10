@@ -26,7 +26,7 @@ export const newTabTool: Tool = createTool({
     'Open a URL in a new browser tab and connect to it. The tab opens in the ' +
     'BACKGROUND so it does not steal the user\'s view; use switchTo: true only ' +
     'when the user is meant to see it. Tabs you open close by themselves when your ' +
-    'MCP session ends or after 60 minutes without use; keepOpenMinutes holds one open ' +
+    'MCP session ends or after the configured idle timeout (60 minutes by default) when cleanup is enabled; keepOpenMinutes holds one open ' +
     'longer (e.g. a payment screen waiting for a person).',
   schema: z.object({
     url: z.string().url().describe('URL to open in the new tab'),
@@ -158,9 +158,16 @@ export const closeTabTool: Tool = createTool({
   name: 'browser_close_tab',
   description: 'Close a browser tab by its ID. If no ID provided, closes the current tab.',
   schema: z.object({
-    tabId: z.number().optional().describe('ID of the tab to close. Omit to close current tab.'),
+    tabId: z.number().int().positive().optional().describe('ID of the tab to close. Omit to close current tab.'),
   }),
   async handle(context, params) {
+    if (params.tabId !== undefined) {
+      const listing = await context.send('browser_list_tabs');
+      const capabilities = listing.result as { closeById?: unknown } | undefined;
+      if (!listing.success || Array.isArray(capabilities) || capabilities?.closeById !== true) {
+        return errorResult('This extension does not support safe closing by ID. Update the extension before closing a named tab.');
+      }
+    }
     const response = await context.send('browser_close_tab', {
       tabId: params.tabId,
     });
@@ -169,7 +176,11 @@ export const closeTabTool: Tool = createTool({
       return errorResult(response.error?.message ?? 'Close tab failed');
     }
 
-    return textResult(params.tabId ? `Closed tab ${params.tabId}` : 'Closed current tab');
+    const closedId = (response.result as { tabId?: unknown } | undefined)?.tabId;
+    if (params.tabId !== undefined && closedId !== params.tabId) {
+      return errorResult('The extension did not confirm closing the requested tab.');
+    }
+    return textResult(params.tabId !== undefined ? `Closed tab ${params.tabId}` : 'Closed current tab');
   },
 });
 

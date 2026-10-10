@@ -11,6 +11,8 @@ import type { AddressInfo } from 'node:net';
 import { WebSocket } from 'ws';
 import { createWSServer, type WSServer } from '../src/ws-server.js';
 import { createTokenStore } from '../src/token-store.js';
+import { createContext } from '../src/context.js';
+import { ConnectionRegistry } from '../src/connection-registry.js';
 import type { ExtensionMessage } from '../src/types.js';
 
 interface FakeExtension {
@@ -186,6 +188,15 @@ describe('multi-connection registry', () => {
     expect(second.messages).toHaveLength(1);
   });
 
+  it('gives replacements different epochs even with the same connectedAt timestamp', async () => {
+    const extension = await connect(await serverPort(server!), { connectionId: 'chrome-a' });
+    const registry = new ConnectionRegistry();
+    const first = registry.add({ connectionId: 'a', ws: extension.socket, now: 1000 }).added;
+    const second = registry.add({ connectionId: 'a', ws: extension.socket, now: 1000 }).added;
+    expect(first.connectedAt).toBe(second.connectedAt);
+    expect(first.connectionEpoch).not.toBe(second.connectionEpoch);
+  });
+
   it('keeps an anonymous id for clients without connectionId', async () => {
     const port = await serverPort(server!);
     await connect(port, {});
@@ -210,6 +221,21 @@ describe('multi-connection registry', () => {
     expect(server!.getConnection()).not.toBeNull();
     expect(server!.getConnection('chrome-a')).not.toBeNull();
     expect(server!.getConnection('chrome-z')).toBeNull();
+  });
+});
+
+describe('per-call context', () => {
+  it('rejects another send after its socket has been replaced', async () => {
+    const manager = createContext({ port: 0, host: '127.0.0.1' });
+    server = manager.wsServer;
+    const port = await serverPort(server);
+    const original = await connect(port, { connectionId: 'chrome-a' });
+    const bound = manager.forConnection('chrome-a');
+    await bound.send('browser_list_tabs');
+    const replacement = await connect(port, { connectionId: 'chrome-a' });
+    await original.closeCode;
+    await expect(bound.send('browser_close_tab', { tabId: 99 })).rejects.toThrow(/connection changed/);
+    expect(replacement.messages).toHaveLength(0);
   });
 });
 

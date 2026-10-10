@@ -78,6 +78,7 @@ async function startServer(options: {
     BROWSER_ALLOW_PAIRING: 'true',
     BROWSER_TOKEN_STORE: options.tokenStore,
     BROWSER_EXTENSION_ZIP: options.zipPath,
+    AGENT_BROWSER_TAB_IDLE_MINUTES: '60',
   };
   delete env.BROWSER_PUBLIC_WS_URL;
   if (options.publicWsUrl) env.BROWSER_PUBLIC_WS_URL = options.publicWsUrl;
@@ -394,6 +395,47 @@ describe('tools/call through an MCP session', () => {
 });
 
 describe('agent tabs when the MCP session ends', () => {
+  it('pins the initially active browser for each session even when another becomes active', async () => {
+    const a = await connectExtension(primary, pairedToken, 'stable-a');
+    const b = await connectExtension(primary, pairedToken, 'stable-b');
+    const first = await openMcpSession(primary);
+    const second = await openMcpSession(primary);
+    try {
+      const initial = await mcpCall('browser_reload', {}, first);
+      expect(initial.isError).toBeUndefined();
+      expect(a.messages).toHaveLength(0);
+      expect(b.messages).toHaveLength(1);
+      await mcpCall('browser_reload', { connection: 'stable-a' }, second);
+      await Promise.all([
+        mcpCall('browser_reload', {}, first),
+        mcpCall('browser_reload', {}, second),
+      ]);
+      expect(a.messages).toHaveLength(2);
+      expect(b.messages).toHaveLength(2);
+    } finally {
+      a.socket.close();
+      b.socket.close();
+      await request(primary, 'DELETE', '/mcp', { headers: { 'mcp-session-id': first } });
+      await request(primary, 'DELETE', '/mcp', { headers: { 'mcp-session-id': second } });
+    }
+  });
+
+  it('refuses a manual close by ID on a legacy extension before any close is sent', async () => {
+    const extension = await connectExtension(primary, pairedToken, 'legacy-close', undefined, () => []);
+    const session = await openMcpSession(primary);
+    try {
+      const result = await mcpCall('browser_close_tab', { connection: 'legacy-close', tabId: 99 }, session);
+      expect(result.isError).toBe(true);
+      expect(extension.messages.map((message) => message.type)).toEqual(['browser_list_tabs']);
+      const invalid = await mcpCall('browser_close_tab', { connection: 'legacy-close', tabId: 0 }, session);
+      expect(invalid.isError).toBe(true);
+      expect(extension.messages).toHaveLength(1);
+    } finally {
+      extension.socket.close();
+      await request(primary, 'DELETE', '/mcp', { headers: { 'mcp-session-id': session } });
+    }
+  });
+
   it('closes the tab the session opened and keeps the one it was asked to hold', async () => {
     const tabs = new Map<number, string>([[1, 'https://user.example/']]);
     let next = 40;

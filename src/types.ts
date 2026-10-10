@@ -98,6 +98,8 @@ export interface ToolResult {
  */
 export interface BrowserConnectionInfo {
   connectionId: string;
+  /** Unique for each socket, including reconnects within the same millisecond. */
+  connectionEpoch?: string;
   label: string;
   userAgent: string;
   connectedAt: number;

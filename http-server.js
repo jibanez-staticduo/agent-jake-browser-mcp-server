@@ -35,6 +35,7 @@ const context = createContext({ port: WS_PORT });
 const tokenStore = getSharedTokenStore();
 const allTools = getAllTools();
 const toolMap = new Map(allTools.map((tool) => [tool.schema.name, tool]));
+const sessionTargets = new Map();
 
 // Agent tabs close when their MCP session ends or after this long without use (src/tab-reaper.ts).
 const TAB_IDLE_MINUTES = idleMinutesFromEnv();
@@ -94,8 +95,9 @@ async function callTool(name, rawArgs, sessionId) {
   tabReaper?.touchSession(sessionId);
 
   const args = { ...(rawArgs ?? {}) };
-  const connection =
+  const explicitConnection =
     typeof args.connection === 'string' && args.connection.trim() ? args.connection.trim() : undefined;
+  let connection = explicitConnection ?? sessionTargets.get(sessionId);
   delete args.connection;
 
   if (tool.serverSide) {
@@ -121,12 +123,20 @@ async function callTool(name, rawArgs, sessionId) {
     }
   }
 
+  if (!connection) {
+    const open = context.listConnections().filter((c) => c.open);
+    const active = open.filter((c) => c.active);
+    const initialTarget = active.length === 1 ? active[0] : open.length === 1 ? open[0] : undefined;
+    if (!initialTarget) {
+      return textContent('Choose a browser with the "connection" argument. Call browser_list_connections to see the current ones.', true);
+    }
+    connection = initialTarget.connectionId;
+  }
+  if (sessionId) sessionTargets.set(sessionId, connection);
   const bound = context.forConnection(connection);
   if (!tabReaper) return tool.handle(bound, args);
-  // Without an explicit id the call goes to the active connection: that is the browser the tab lives in.
-  const target = connection ?? context.listConnections().find((c) => c.active)?.connectionId;
   const keepOpenMinutes = typeof args.keepOpenMinutes === 'number' ? args.keepOpenMinutes : undefined;
-  return tool.handle(tabReaper.track(bound, sessionId, target, keepOpenMinutes), args);
+  return tool.handle(tabReaper.track(bound, sessionId, connection, keepOpenMinutes), args);
 }
 
 function createMcpServer() {
@@ -365,6 +375,7 @@ app.post('/mcp', async (req, res) => {
       transport.onclose = () => {
         if (transport.sessionId) {
           void tabReaper?.sessionClosed(transport.sessionId);
+          sessionTargets.delete(transport.sessionId);
           transports.delete(transport.sessionId);
           servers.delete(transport.sessionId);
         }

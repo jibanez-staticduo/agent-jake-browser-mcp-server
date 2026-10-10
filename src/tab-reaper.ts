@@ -11,9 +11,8 @@
  * `keepOpenMinutes` on browser_new_tab / browser_switch_tab holds it open until then, for a
  * tab that waits on a person (a payment ready for a human to confirm) after its session is gone.
  *
- * Chrome reuses tab ids after a restart, so a tab is closed only after the browser lists it
- * with the URL last seen for it: across a reconnection a different URL under the same id is
- * someone else's tab, and the entry is dropped instead.
+ * Chrome reuses tab ids after a restart. A socket reconnection invalidates all tracked tabs:
+ * neither the numeric id nor its URL proves that it is still the tab the agent opened.
  *
  * Extension builds that predate closing by id ignored the id of browser_close_tab and closed the
  * connected tab. So the reaper closes only on a browser whose tab listing announces
@@ -34,6 +33,7 @@ interface TrackedTab {
   url: string;
   /** connectedAt of the browser connection when `url` was last observed. */
   connectedAt: number;
+  connectionEpoch: string | number;
   sessionClosed: boolean;
 }
 
@@ -104,9 +104,23 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
   let sweeping: Promise<number> | null = null;
   /** Browsers whose extension closed a tab without echoing its id: never closed again. */
   const unsafe = new Set<string>();
+  const inFlight = new Map<string, number>();
+  const activeSessions = new Map<string, number>();
+  const closedSessions = new Set<string>();
 
   const connectedAtOf = (connectionId: string) =>
     options.listConnections().find((c) => c.connectionId === connectionId)?.connectedAt ?? 0;
+  const epochOf = (connectionId: string) => {
+    const connection = options.listConnections().find((c) => c.connectionId === connectionId && c.open);
+    return connection?.connectionEpoch ?? connection?.connectedAt;
+  };
+
+  function invalidate(connectionId: string) {
+    for (const [id, tab] of tabs) {
+      if (tab.connectionId === connectionId && tab.connectionEpoch !== epochOf(connectionId)) tabs.delete(id);
+    }
+    currentTab.delete(connectionId);
+  }
 
   function touch(connectionId: string, tabId: number | undefined, sessionId: string) {
     if (tabId === undefined) return;
@@ -131,7 +145,8 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
       keepUntil: 0,
       url,
       connectedAt: connectedAtOf(connectionId),
-      sessionClosed: false,
+      connectionEpoch: epochOf(connectionId)!,
+      sessionClosed: closedSessions.has(sessionId),
     });
     logger.info(`[tab-reaper] tab ${tabId} on ${connectionId} belongs to session ${sessionId}`);
   }
@@ -186,11 +201,31 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
     return {
       ...context,
       send: async (type, payload = {}, ...rest) => {
+        const epoch = epochOf(connectionId);
+        if ([...tabs.values()].some((tab) => tab.connectionId === connectionId && tab.connectionEpoch !== epoch)) {
+          invalidate(connectionId);
+        }
+        inFlight.set(connectionId, (inFlight.get(connectionId) ?? 0) + 1);
+        activeSessions.set(sessionId, (activeSessions.get(sessionId) ?? 0) + 1);
         const named = typeof payload.tabId === 'number' ? payload.tabId : undefined;
         touch(connectionId, named ?? (TAB_MANAGEMENT.has(type) ? undefined : currentTab.get(connectionId)), sessionId);
-        const response = await context.send(type, payload, ...rest);
-        observe(sessionId, connectionId, type, payload, response, keepOpenMinutes);
-        return response;
+        try {
+          const response = await context.send(type, payload, ...rest);
+          if (epoch !== undefined && epoch === epochOf(connectionId)) {
+            observe(sessionId, connectionId, type, payload, response, keepOpenMinutes);
+            touch(connectionId, named ?? (TAB_MANAGEMENT.has(type) ? undefined : currentTab.get(connectionId)), sessionId);
+          }
+          return response;
+        } finally {
+          const remaining = (inFlight.get(connectionId) ?? 1) - 1;
+          if (remaining) inFlight.set(connectionId, remaining);
+          else inFlight.delete(connectionId);
+          const sessionRemaining = (activeSessions.get(sessionId) ?? 1) - 1;
+          if (sessionRemaining) activeSessions.set(sessionId, sessionRemaining);
+          else activeSessions.delete(sessionId);
+          touchSession(sessionId);
+          if (closedSessions.has(sessionId)) void (sweeping ?? Promise.resolve()).then(() => sweep());
+        }
       },
     };
   }
@@ -205,7 +240,8 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
     if (!connectionId) return;
     const tab = tabs.get(key(connectionId, tabId));
     if (!tab) return;
-    const capped = Math.min(Math.max(minutes, 0), MAX_KEEP_MINUTES);
+    if (!Number.isFinite(minutes) || minutes < 0) return;
+    const capped = Math.min(minutes, MAX_KEEP_MINUTES);
     tab.keepUntil = Math.max(tab.keepUntil, now() + capped * 60_000);
   }
 
@@ -224,7 +260,7 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
     if (echoed !== tab.tabId) {
       unsafe.add(tab.connectionId);
       logger.error(
-        `[tab-reaper] asked ${tab.connectionId} to close tab ${tab.tabId} and it answered ${JSON.stringify(answer.result)}: ` +
+        `[tab-reaper] ${tab.connectionId} did not confirm closing tab ${tab.tabId}: ` +
           'its extension does not close by id (needs an extension that announces closeById); no more closing on that browser',
       );
       return false;
@@ -235,14 +271,29 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
     return true;
   }
 
-  async function sweepConnection(connection: BrowserConnectionInfo, mine: TrackedTab[], t: number): Promise<number> {
+  async function sweepConnection(connection: BrowserConnectionInfo, mine: TrackedTab[]): Promise<number> {
+    const epoch = connection.connectionEpoch ?? connection.connectedAt;
+    if (mine.some((tab) => tab.connectionEpoch !== epoch)) {
+      invalidate(connection.connectionId);
+      mine = mine.filter((tab) => tab.connectionEpoch === epoch);
+    }
+    if (!mine.length || inFlight.has(connection.connectionId)) return 0;
     const listing = await options.send(connection.connectionId, 'browser_list_tabs');
     if (!listing.success) return 0;
+    if (epochOf(connection.connectionId) !== epoch) {
+      invalidate(connection.connectionId);
+      return 0;
+    }
     const open = new Map(listedTabs(listing).map((tab) => [tab.id, tab.url ?? '']));
     const announced = closesById(listing);
     let closed = 0;
 
     for (const tab of mine) {
+      if (tabs.get(key(tab.connectionId, tab.tabId)) !== tab) continue;
+      if (epochOf(connection.connectionId) !== epoch) {
+        invalidate(connection.connectionId);
+        break;
+      }
       const url = open.get(tab.tabId);
       const forget = () => {
         tabs.delete(key(tab.connectionId, tab.tabId));
@@ -250,15 +301,13 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
       };
       if (url === undefined) {
         forget(); // already gone
-      } else if (tab.connectedAt !== connection.connectedAt && url !== tab.url) {
-        // The browser reconnected and that id now shows another page: maybe not our tab.
-        logger.warn(`[tab-reaper] tab ${tab.tabId} on ${tab.connectionId} changed across a reconnection; no longer tracked`);
-        forget();
-      } else if (isDue(tab, t)) {
+      } else if (!inFlight.has(connection.connectionId) && !activeSessions.has(tab.sessionId) && isDue(tab, now())) {
         // Stays tracked: it closes once the browser runs a build that can.
         if (!announced || unsafe.has(tab.connectionId)) continue;
-        if (await closeTab(tab)) closed++;
-        forget();
+        if (await closeTab(tab)) {
+          closed++;
+          if (tabs.get(key(tab.connectionId, tab.tabId)) === tab) forget();
+        }
       } else {
         tab.url = url;
         tab.connectedAt = connection.connectedAt;
@@ -268,16 +317,20 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
   }
 
   async function runSweep(): Promise<number> {
-    const t = now();
     let closed = 0;
     for (const connection of options.listConnections()) {
       if (connection.open === false) continue;
       const mine = [...tabs.values()].filter((tab) => tab.connectionId === connection.connectionId);
       if (!mine.length) continue;
       try {
-        closed += await sweepConnection(connection, mine, t);
+        closed += await sweepConnection(connection, mine);
       } catch (error) {
         logger.warn(`[tab-reaper] sweep of ${connection.connectionId} failed: ${(error as Error).message}`);
+      }
+    }
+    for (const sessionId of closedSessions) {
+      if (!activeSessions.has(sessionId) && ![...tabs.values()].some((tab) => tab.sessionId === sessionId)) {
+        closedSessions.delete(sessionId);
       }
     }
     return closed;
@@ -291,6 +344,9 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
   }
 
   async function sessionClosed(sessionId: string) {
+    if (activeSessions.has(sessionId) || [...tabs.values()].some((tab) => tab.sessionId === sessionId)) {
+      closedSessions.add(sessionId);
+    }
     let any = false;
     for (const tab of tabs.values()) {
       if (tab.sessionId === sessionId) {

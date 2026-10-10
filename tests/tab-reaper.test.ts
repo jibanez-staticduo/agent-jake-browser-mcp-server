@@ -210,6 +210,7 @@ describe('tab reaper', () => {
     await call('s1', 'browser_new_tab', { url: 'https://shop.example/' }); // 100, connected
     browser.open = false; // keep it tracked past the end of s1
     await reaper.sessionClosed('s1');
+    browser.open = true;
 
     await call('s2', 'browser_list_tabs');
     await call('s2', 'browser_send_to_back');
@@ -223,6 +224,7 @@ describe('tab reaper', () => {
     await call('s1', 'browser_new_tab', { url: 'https://shop.example/' }); // 100, connected
     browser.open = false;
     await reaper.sessionClosed('s1');
+    browser.open = true;
 
     await call('s2', 'browser_snapshot'); // works in tab 100: it is s2's now
     browser.open = true;
@@ -288,11 +290,13 @@ describe('tab reaper', () => {
     expect(browser.tabs.has(100)).toBe(false);
   });
 
-  it('closes after a reconnection when the tab still shows the same page', async () => {
+  it('forgets after a reconnection even when a reused ID shows the same page', async () => {
     await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
     browser.connectedAt = 2000; // service worker restarted, same Chrome
     await reaper.sessionClosed('s1');
-    expect(browser.tabs.has(100)).toBe(false);
+    expect(browser.closes()).toEqual([]);
+    expect(browser.tabs.has(100)).toBe(true);
+    expect(reaper.tracked()).toHaveLength(0);
   });
 
   it('leaves alone a reused tab id after the browser restarted', async () => {
@@ -307,7 +311,7 @@ describe('tab reaper', () => {
     expect(reaper.tracked()).toHaveLength(0);
   });
 
-  it('follows navigation while connected, so the reconnection check uses the latest page', async () => {
+  it('allows navigation while connected but invalidates ownership on reconnection', async () => {
     await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
     browser.tabs.set(100, 'https://shop.example/cart');
     clock = 10 * 60_000;
@@ -315,7 +319,96 @@ describe('tab reaper', () => {
 
     browser.connectedAt = 2000;
     await reaper.sessionClosed('s1');
+    expect(browser.closes()).toEqual([]);
+  });
+
+  it('does not close a tab being used by a long running call', async () => {
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
+    let finish!: () => void;
+    const original = browser.send.bind(browser);
+    browser.send = async (type, payload) => {
+      if (type === 'browser_snapshot') await new Promise<void>((resolve) => { finish = resolve; });
+      return original(type, payload);
+    };
+    const pending = call('s2', 'browser_snapshot');
+    clock = 2 * HOUR;
+    expect(await reaper.sweep()).toBe(0);
+    finish();
+    await pending;
+    expect(await reaper.sweep()).toBe(0);
+    expect(browser.tabs.has(100)).toBe(true);
+  });
+
+  it('rechecks activity and retention after awaiting a listing', async () => {
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
+    clock = HOUR;
+    let finish!: () => void;
+    const original = browser.send.bind(browser);
+    browser.send = async (type, payload) => {
+      if (type === 'browser_list_tabs') await new Promise<void>((resolve) => { finish = resolve; });
+      return original(type, payload);
+    };
+    const pending = reaper.sweep();
+    reaper.keep('x86', 100, 60);
+    reaper.touchSession('s1');
+    finish();
+    expect(await pending).toBe(0);
+    expect(browser.closes()).toEqual([]);
+  });
+
+  it('invalidates when the socket reconnects while the listing is in flight', async () => {
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
+    const original = browser.send.bind(browser);
+    browser.send = async (type, payload) => {
+      const answer = await original(type, payload);
+      if (type === 'browser_list_tabs') browser.connectedAt++;
+      return answer;
+    };
+    await reaper.sessionClosed('s1');
+    expect(browser.closes()).toEqual([]);
+    expect(reaper.tracked()).toHaveLength(0);
+  });
+
+  it('does not adopt a late open response from a replaced connection', async () => {
+    const original = browser.send.bind(browser);
+    browser.send = async (type, payload) => {
+      const answer = await original(type, payload);
+      if (type === 'browser_new_tab') browser.connectedAt++;
+      return answer;
+    };
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
+    await reaper.sessionClosed('s1');
+    expect(reaper.tracked()).toHaveLength(0);
+    expect(browser.closes()).toEqual([]);
+  });
+
+  it('cleans up a tab opened after its session ended during the call', async () => {
+    let finish!: () => void;
+    const original = browser.send.bind(browser);
+    browser.send = async (type, payload) => {
+      if (type === 'browser_new_tab') await new Promise<void>((resolve) => { finish = resolve; });
+      return original(type, payload);
+    };
+    const pending = call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
+    await reaper.sessionClosed('s1');
+    finish();
+    await pending;
+    await reaper.sweep();
     expect(browser.closes()).toEqual([100]);
+  });
+
+  it('retries a failed close rather than forgetting the tab', async () => {
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
+    const original = browser.send.bind(browser);
+    let fail = true;
+    browser.send = async (type, payload) => {
+      if (type === 'browser_close_tab' && fail) return { id: 'r', success: false };
+      return original(type, payload);
+    };
+    await reaper.sessionClosed('s1');
+    expect(reaper.tracked()).toHaveLength(1);
+    fail = false;
+    expect(await reaper.sweep()).toBe(1);
   });
 });
 
