@@ -213,7 +213,10 @@ a tracked tab for up to 1440 minutes. User-created tabs are never adopted merely
 by switching to them. Automatic and explicit closing by ID require an extension
 that announces `closeById` and echoes the closed ID; legacy extensions fail closed.
 Reconnects invalidate ownership, so old tabs remain open rather than risking an
-ID reused by Chrome. Browser selection is pinned per MCP session after its first
+ID reused by Chrome. Shared tabs remain tracked while a participating MCP session
+is live, until all participants end or the idle timeout expires. While cleanup
+awaits a close acknowledgement, new commands on that browser are rejected for
+retry instead of adopting a tab being closed. Browser selection is pinned per MCP session after its first
 call; an explicit `connection` argument changes that session's target.
 
 ## Tools
