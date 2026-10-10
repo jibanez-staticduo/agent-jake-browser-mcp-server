@@ -443,14 +443,17 @@ export const fillSecretTool: Tool = createTool({
     { message: 'Either ref or selector must be provided' }
   ),
   async handle(context, params) {
+    if (process.env.AGENT_BROWSER_FILL_SECRET_ENABLED !== 'true') {
+      return errorResult('Secret filling is disabled on this server.');
+    }
     let value: string;
     try {
       value = await readSecret(params.secretRef);
     } catch {
       // A configurable reader may put secrets in stderr or its exception message.
-      return errorResult(`Could not read ${params.secretRef}. Check the configured 1Password reader, credentials and AGENT_BROWSER_OP_BACKEND on the server.`);
+      return errorResult('Could not read the secret. Check the configured 1Password reader, credentials and AGENT_BROWSER_OP_BACKEND on the server.');
     }
-    if (!value) return errorResult(`Empty secret at ${params.secretRef}`);
+    if (!value) return errorResult('The configured reader returned an empty secret.');
     let response: ExtensionResponse;
     try {
       response = await context.send('browser_type', {
@@ -463,17 +466,17 @@ export const fillSecretTool: Tool = createTool({
     } catch {
       return errorResult('Could not deliver the secret to the browser. Check the connection and target field before retrying.');
     }
-    if (!response.success) {
+    if (response?.success !== true) {
       return errorResult('Could not fill the target field. Check the field before retrying.');
     }
     if (hasFieldWarning(response.result) ||
-        (response.result as { typed?: unknown; verified?: unknown } | undefined)?.typed !== true ||
+        (response.result as { typed?: unknown } | undefined)?.typed !== true ||
         (response.result as { verified?: unknown } | undefined)?.verified !== true) {
       // An error, not a success with a note: submitting a field without the secret (a 2FA code
       // above all) burns an attempt.
-      return errorResult(`Did not fill ${params.ref ?? params.selector} as expected. Check the field and fill it again before submitting.`);
+      return errorResult('Did not fill the target field as expected. Check the field before retrying or submitting.');
     }
-    return textResult(`Filled ${params.ref ?? params.selector} with ${params.secretRef} (${value.length} chars)`);
+    return textResult('Filled and verified the target field.');
   },
 });
 

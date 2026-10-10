@@ -7,7 +7,7 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
-    include: ['packages/core/tests/**/*.test.ts', 'tests/entrypoints.test.ts'],
+    include: ['packages/core/tests/**/*.test.ts', 'tests/entrypoints.test.ts', 'tests/deploy-k8s.test.ts'],
     exclude: ['tests/integration/**'],
     coverage: {
       provider: 'v8',

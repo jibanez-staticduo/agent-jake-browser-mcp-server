@@ -26,6 +26,13 @@ This server implements the MCP protocol to expose browser automation tools to AI
 
 ## Installation
 
+The root Dockerfile builds the compiled canonical core and includes the verified
+1Password CLI. Docker Compose reads configuration from each installation's `.env`;
+Kubernetes uses the example [manifests](deploy/k8s/README.md). Both use the same
+image and environment contract. Never expose the unauthenticated MCP endpoint
+without the installation's existing network/authentication boundary.
+
+
 ```bash
 git clone https://github.com/SnakeO/agent-jake-browser-mcp-server.git
 cd agent-jake-browser-mcp-server
@@ -147,7 +154,9 @@ metadata does not change authentication or browser routing.
 | `BROWSER_PUBLIC_ORIGIN` | derived | Origin used to build the approval link returned by `/pair/start`. Set it when the proxy host is not derivable from the request. |
 | `AGENT_BROWSER_OUT_DIR` | system temp dir | Where `browser_pdf` and tool results saved with `filename` write their files. |
 | `AGENT_BROWSER_DROP_DIR` | unset (file drops disabled) | Directory of files available to `browser_drop`. Files must be direct children, with no symlinks; maximum 8 files and 10 MiB total per call. Mount only files intended for browser upload. MIME data-only drops remain available with a 1 MiB limit. |
-| `AGENT_BROWSER_FILL_SECRET_ENABLED` | unset (OFF) | Only the exact value `true` registers `browser_fill_secret`. Enable after validating that the installed extension preserves the secret flag, redacts logs, and returns `{ typed: true, verified: true }`. |
+| `AGENT_BROWSER_OP_BIN` | `op` | Configurable reader implementing `<bin> read <ref>`. |
+| `AGENT_BROWSER_OP_BACKEND` | unset (environment as is) | `connect` or `service-account`; credentials come from deployment environment. |
+| `AGENT_BROWSER_FILL_SECRET_ENABLED` | unset (OFF) | Only the exact value `true` permits discovery and execution of `browser_fill_secret`. Enable after validating that the installed extension preserves the secret flag, redacts logs, and returns `{ typed: true, verified: true }`. |
 | `AGENT_BROWSER_ALLOW_UNSAFE_CODE` | unset (disabled) | Set exactly `1` to enable `browser_run_code_unsafe`, which executes arbitrary JavaScript in the MCP server process. Only use it with fully trusted MCP clients. |
 
 PDFs and network or console results written with a path must be direct children of
@@ -348,8 +357,9 @@ MIT - See [LICENSE](LICENSE)
 
 `browser_fill_secret` reads `op://vault/item/field` with the 1Password CLI (`op read`) on the server
 machine and types it with `browser_type`, flagged `secret`. The server omits the value from this tool's
-result and does not forward reader stderr or browser/transport error text. The result only says how
-many characters were typed. This is not a guarantee against reading the page with another tool.
+result and does not forward reader stderr or browser/transport error text. Diagnostics omit the
+secret reference, target selector and secret length; success requires boolean `success: true`,
+`typed: true` and `verified: true`. This is not a guarantee against reading the page with another tool.
 
 Use only an extension that preserves `secret` and redacts both request and response logs. Legacy
 extensions may discard the flag and log the typed value; installing this server alone does not fix

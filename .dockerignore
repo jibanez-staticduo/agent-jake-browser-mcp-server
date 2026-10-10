@@ -1,0 +1,15 @@
+# The build context is copied wholesale by `COPY . .`; without this the image
+# layer carries node_modules (rebuilt anyway by npm ci) and the whole .git
+# history, which is both slow and a way to ship secrets by accident.
+.git
+.gitignore
+node_modules
+dist
+coverage
+test-results
+playwright-report
+*.log
+.env
+.env.*
+.DS_Store
+deploy

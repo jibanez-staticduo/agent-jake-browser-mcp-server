@@ -3,7 +3,7 @@
  * `secret` flag, and never shows up in the result.
  */
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
-import { mkdtemp, writeFile, chmod } from 'node:fs/promises';
+import { mkdtemp, writeFile, chmod, access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { getAllTools } from '../src/tools/index.js';
@@ -26,6 +26,12 @@ function fakeContext(result: unknown = { typed: true, verified: true }) {
 }
 
 const tool = fillSecretTool;
+const originalGate = process.env.AGENT_BROWSER_FILL_SECRET_ENABLED;
+beforeEach(() => { process.env.AGENT_BROWSER_FILL_SECRET_ENABLED = 'true'; });
+afterEach(() => {
+  if (originalGate === undefined) delete process.env.AGENT_BROWSER_FILL_SECRET_ENABLED;
+  else process.env.AGENT_BROWSER_FILL_SECRET_ENABLED = originalGate;
+});
 
 async function fakeOp(body: string) {
   const dir = await mkdtemp(join(tmpdir(), 'op-'));
@@ -38,22 +44,6 @@ async function fakeOp(body: string) {
 describe('browser_fill_secret', () => {
   afterEach(() => { delete process.env.AGENT_BROWSER_OP_BIN; });
 
-  it.each([
-    { typed: true, verified: false, length: 0 },
-    { typed: false, verified: true },
-    { typed: true },
-    {},
-    null,
-    { typed: SECRET, verified: true },
-  ])('rejects an unverified or incompatible extension acknowledgement %j', async result => {
-    await fakeOp(`printf '%s\\n' '${SECRET}'`);
-    const { context } = fakeContext(result);
-    const r = await tool.handle(context, { ref: 'e5', secretRef: 'op://Private/item/password' });
-    expect(r.isError).toBe(true);
-    expect(JSON.stringify(r)).not.toContain(SECRET);
-    expect(JSON.stringify(r)).not.toContain('Filled ');
-  });
-
   it('types the secret flagged as secret and keeps it out of the result', async () => {
     await fakeOp(`[ "$1" = read ] && [ "$2" = "op://Private/item/password" ] && printf '%s\\n' '${SECRET}'`);
     const { context, sent } = fakeContext();
@@ -61,7 +51,9 @@ describe('browser_fill_secret', () => {
     expect(sent).toEqual([{ type: 'browser_type', payload: { ref: 'e5', selector: undefined, text: SECRET, clear: true, secret: true } }]);
     const out = JSON.stringify(r);
     expect(out).not.toContain(SECRET);
-    expect(out).toContain(`${SECRET.length} chars`);
+    expect(out).toContain('Filled and verified');
+    expect(out).not.toContain('op://Private');
+    expect(out).not.toContain(`${SECRET.length} chars`);
   });
 
   it('fails without typing when the secret cannot be read', async () => {
@@ -116,7 +108,7 @@ describe('browser_fill_secret', () => {
     const r = await tool.handle(context, { selector: '#otp', secretRef: 'op://Private/item/password' });
     expect(r.isError).toBe(true);
     const out = JSON.stringify(r);
-    expect(out).toContain('Did not fill #otp as expected');
+    expect(out).toContain('Did not fill the target field as expected');
     expect(out).not.toContain(SECRET);
   });
 
@@ -191,5 +183,47 @@ describe('browser_fill_secret backend (AGENT_BROWSER_OP_BACKEND)', () => {
       expect(JSON.stringify(r)).toContain('AGENT_BROWSER_OP_BACKEND');
       expect(sent).toEqual([]);
     }
+  });
+});
+
+
+describe('secret fill activation and acknowledgements', () => {
+  afterEach(() => { delete process.env.AGENT_BROWSER_OP_BIN; });
+
+  it.each([undefined, '', 'false', '1', 'TRUE', ' true', 'true '])('blocks discovery and execution with gate %j before reading', async gate => {
+    const dir = await mkdtemp(join(tmpdir(), 'op-gate-'));
+    const marker = join(dir, 'reader-called');
+    await fakeOp(`touch '${marker}'; printf '%s' '${SECRET}'`);
+    if (gate === undefined) delete process.env.AGENT_BROWSER_FILL_SECRET_ENABLED;
+    else process.env.AGENT_BROWSER_FILL_SECRET_ENABLED = gate;
+    expect(getAllTools().some(x => x.schema.name === 'browser_fill_secret')).toBe(false);
+    const { context, sent } = fakeContext();
+    const result = await tool.handle(context, { ref: 'e5', secretRef: 'op://v/i/f' });
+    expect(result.isError).toBe(true);
+    expect(sent).toEqual([]);
+    await expect(access(marker)).rejects.toThrow();
+  });
+
+  it('discovers the tool only with the exact enabled value', () => {
+    expect(getAllTools().some(x => x.schema.name === 'browser_fill_secret')).toBe(true);
+  });
+
+  it.each([
+    { success: true, result: {} },
+    { success: true, result: { typed: true, verified: false } },
+    { success: true, result: { typed: false, verified: true } },
+    { success: true, result: { typed: 'true', verified: true } },
+    { success: true, result: { typed: true, verified: 'true' } },
+    { success: 'true', result: { typed: true, verified: true } },
+    { success: 'false', result: { typed: true, verified: true } },
+    { success: true, result: null },
+    null,
+  ])('rejects legacy or malformed acknowledgement %j', async response => {
+    await fakeOp(`printf '%s' '${SECRET}'`);
+    const { context } = fakeContext();
+    context.send = async () => response as unknown as ExtensionResponse;
+    const result = await tool.handle(context, { ref: 'e5', secretRef: 'op://v/i/f' });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result)).not.toContain(SECRET);
   });
 });
