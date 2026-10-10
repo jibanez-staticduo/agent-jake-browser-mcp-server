@@ -130,6 +130,7 @@ also works while nothing is connected.
 | `AGENT_BROWSER_OUT_DIR` | system temp dir | Where `browser_pdf` and tool results saved with `filename` write their files. |
 | `AGENT_BROWSER_DROP_DIR` | unset (file drops disabled) | Directory of files available to `browser_drop`. Files must be direct children, with no symlinks; maximum 8 files and 10 MiB total per call. Mount only files intended for browser upload. MIME data-only drops remain available with a 1 MiB limit. |
 | `AGENT_BROWSER_OP_BIN` | `op` | Binary that `browser_fill_secret` runs as `<bin> read <op://ref>`. Point it to a wrapper with the same contract (desktop-app unlock, your own backend choice). |
+| `AGENT_BROWSER_FILL_SECRET_ENABLED` | unset (disabled) | Set exactly `true` after verifying the paired extension supports secret redaction and field verification. Controls both tool discovery and execution. |
 | `AGENT_BROWSER_OP_BACKEND` | unset (environment as is) | 1Password backend for `browser_fill_secret`: `connect` (a 1Password Connect server, `OP_CONNECT_HOST` + `OP_CONNECT_TOKEN`; the service account token is dropped) or `service-account` (`OP_SERVICE_ACCOUNT_TOKEN`; `OP_CONNECT_*` are dropped). Any other value is an error. See [1Password](#1password). |
 | `AGENT_BROWSER_ALLOW_UNSAFE_CODE` | unset (disabled) | Set exactly `1` to enable `browser_run_code_unsafe`, which executes arbitrary JavaScript in the MCP server process. Only use it with fully trusted MCP clients. |
 
@@ -315,10 +316,14 @@ MIT - See [LICENSE](LICENSE)
 
 ## 1Password
 
-`browser_fill_secret` reads `op://vault/item/field` with the 1Password CLI (`op read`) on the server
+`browser_fill_secret` is disabled by default. Set `AGENT_BROWSER_FILL_SECRET_ENABLED=true` explicitly
+only after verifying the paired extension. Other values, including `TRUE` and `1`, keep it disabled.
+When enabled, it reads `op://vault/item/field` with the 1Password CLI (`op read`) on the server
 machine and types it with `browser_type`, flagged `secret`. The server omits the value from this tool's
-result and does not forward reader stderr or browser/transport error text. The result only says how
-many characters were typed. This is not a guarantee against reading the page with another tool.
+result and does not forward reader stderr or browser/transport error text. Success requires the
+extension to return boolean `success: true`, `typed: true`, and `verified: true`; legacy or unverified
+acknowledgements fail. Diagnostics omit secret references, target selectors and secret length.
+This is not a guarantee against reading the page with another tool.
 
 Use only an extension that preserves `secret` and redacts both request and response logs. Legacy
 extensions may discard the flag and log the typed value; installing this server alone does not fix
