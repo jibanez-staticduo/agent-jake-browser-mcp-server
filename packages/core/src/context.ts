@@ -109,8 +109,14 @@ export function createContext(options: ContextOptions): ContextManager {
     },
 
     forConnection(connectionId?: string): Context {
+      const socket = wsServer.getConnection(connectionId);
       return {
-        send: (type, payload = {}) => sendFor(connectionId, type, payload),
+        send: (type, payload = {}) => {
+          if (wsServer.getConnection(connectionId) !== socket) {
+            return Promise.reject(new Error('Browser connection changed during this call. Retry against the current connection.'));
+          }
+          return sendFor(connectionId, type, payload);
+        },
         isConnected: (id?: string) => isConnectedFor(id ?? connectionId),
         listConnections: () => wsServer.listConnectionInfos(),
         waitForConnection: (timeout?: number) => waitForAnyConnection(timeout),

@@ -7,11 +7,13 @@
  * here) so the targeting rules can be unit tested.
  */
 import { WebSocket } from 'ws';
+import { randomUUID } from 'node:crypto';
 import type { BrowserConnectionInfo } from './types.js';
 import type { ClientIpInfo } from './client-ip.js';
 
 export interface ManagedConnection extends ClientIpInfo {
   connectionId: string;
+  connectionEpoch: string;
   ws: WebSocket;
   label: string;
   userAgent: string;
@@ -52,6 +54,7 @@ export class ConnectionRegistry {
     const at = input.now ?? Date.now();
     const added: ManagedConnection = {
       connectionId: input.connectionId,
+      connectionEpoch: randomUUID(),
       ws: input.ws,
       label: input.label || '',
       clientIp: input.clientIp ?? null,
@@ -144,6 +147,7 @@ export class ConnectionRegistry {
       .sort((a, b) => a.connectedAt - b.connectedAt)
       .map((c) => ({
         connectionId: c.connectionId,
+        connectionEpoch: c.connectionEpoch,
         label: c.label,
         clientIp: c.clientIp,
         peerIp: c.peerIp,

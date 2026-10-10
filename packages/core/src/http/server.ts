@@ -16,6 +16,7 @@ import { getAllTools } from '../tools/index.js';
 import { getSharedTokenStore } from '../token-store.js';
 import { createPairingStore } from '../pairing-store.js';
 import { patchZipConfig } from '../extension-zip.js';
+import { createTabReaper, idleMinutesFromEnv } from '../tab-reaper.js';
 
 
 export interface HttpServerOptions {
@@ -57,6 +58,22 @@ export function createHttpServer(options: HttpServerOptions = {}): HttpServer {
   const tokenStore = getSharedTokenStore();
   const allTools = getAllTools();
   const toolMap = new Map(allTools.map((tool) => [tool.schema.name, tool]));
+  const sessionTargets = new Map<string, string>();
+
+  // Agent tabs close when their MCP session ends or after this long without use (packages/core/src/tab-reaper.ts).
+  const TAB_IDLE_MINUTES = idleMinutesFromEnv();
+  const tabReaper = TAB_IDLE_MINUTES > 0
+    ? createTabReaper({
+        idleMs: TAB_IDLE_MINUTES * 60_000,
+        send: (connectionId, type, payload) => context.send(type, payload, connectionId),
+        listConnections: () => context.listConnections(),
+      })
+    : null;
+  const reaperTimer = tabReaper
+    ? setInterval(() => void tabReaper.sweep(), 5 * 60_000)
+    : undefined;
+  reaperTimer?.unref();
+
 
   const pairing = createPairingStore({
     issueToken: (record) =>
@@ -97,13 +114,15 @@ export function createHttpServer(options: HttpServerOptions = {}): HttpServer {
    * Resolve the target browser, run the tool against that connection and keep
    * `connection` out of the arguments sent to the extension.
    */
-  async function callTool(name: string, rawArgs?: Record<string, unknown>): Promise<ToolResult> {
+  async function callTool(name: string, rawArgs?: Record<string, unknown>, sessionId?: string): Promise<ToolResult> {
     const tool = toolMap.get(name);
     if (!tool) return textContent(`Unknown tool: ${name}`, true);
+    tabReaper?.touchSession(sessionId);
 
     const args = { ...(rawArgs ?? {}) };
-    const connection =
+    const explicitConnection =
       typeof args.connection === 'string' && args.connection.trim() ? args.connection.trim() : undefined;
+    let connection = explicitConnection ?? (sessionId ? sessionTargets.get(sessionId) : undefined);
     delete args.connection;
 
     if (tool.serverSide) {
@@ -129,7 +148,20 @@ export function createHttpServer(options: HttpServerOptions = {}): HttpServer {
       }
     }
 
-    return tool.handle(context.forConnection(connection), args);
+    if (!connection) {
+      const open = context.listConnections().filter((c) => c.open);
+      const active = open.filter((c) => c.active);
+      const initialTarget = active.length === 1 ? active[0] : open.length === 1 ? open[0] : undefined;
+      if (!initialTarget) {
+        return textContent('Choose a browser with the "connection" argument. Call browser_list_connections to see the current ones.', true);
+      }
+      connection = initialTarget.connectionId;
+    }
+    if (sessionId) sessionTargets.set(sessionId, connection);
+    const bound = context.forConnection(connection);
+    if (!tabReaper) return tool.handle(bound, args);
+    const keepOpenMinutes = typeof args.keepOpenMinutes === 'number' ? args.keepOpenMinutes : undefined;
+    return tool.handle(tabReaper.track(bound, sessionId, connection, keepOpenMinutes), args);
   }
 
   function createMcpServer() {
@@ -142,8 +174,8 @@ export function createHttpServer(options: HttpServerOptions = {}): HttpServer {
       tools: toolsListPayload(),
     }));
 
-    server.setRequestHandler(CallToolRequestSchema, async (request) =>
-      callTool(request.params.name, request.params.arguments) as Promise<import('@modelcontextprotocol/sdk/types.js').CallToolResult>,
+    server.setRequestHandler(CallToolRequestSchema, async (request, extra) =>
+      callTool(request.params.name, request.params.arguments, extra.sessionId) as Promise<import('@modelcontextprotocol/sdk/types.js').CallToolResult>,
     );
 
     return server;
@@ -371,6 +403,8 @@ export function createHttpServer(options: HttpServerOptions = {}): HttpServer {
         });
         transport.onclose = () => {
           if (transport.sessionId) {
+            void tabReaper?.sessionClosed(transport.sessionId);
+            sessionTargets.delete(transport.sessionId);
             transports.delete(transport.sessionId);
             servers.delete(transport.sessionId);
           }
@@ -432,6 +466,7 @@ export function createHttpServer(options: HttpServerOptions = {}): HttpServer {
       return listener;
     },
     async close() {
+      if (reaperTimer) clearInterval(reaperTimer);
       await Promise.all([...servers.values()].map((server) => server.close()));
       await Promise.all([...transports.values()].map((transport) => transport.close()));
       if (listener) {

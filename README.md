@@ -151,6 +151,7 @@ metadata does not change authentication or browser routing.
 | `BROWSER_PUBLIC_WS_URL` | derived | Full `ws(s)://host/path` handed to the extension. Use it when the proxy mapping is not derivable from the request. |
 | `BROWSER_WS_PATH` | `/` | Path advertised to the extension, for proxies that map the socket to a subpath. |
 | `MCP_HTTP_HOST` / `MCP_HTTP_PORT` | `127.0.0.1` / `8000` | MCP streamable HTTP endpoint. |
+| `AGENT_BROWSER_TAB_IDLE_MINUTES` | `60` | HTTP mode: tabs an MCP session opened close when that session ends or after this many minutes without use; `0` turns it off. `keepOpenMinutes` on `browser_new_tab` / `browser_switch_tab` holds one longer. Needs an extension that announces `closeById`. |
 | `BROWSER_PUBLIC_ORIGIN` | derived | Origin used to build the approval link returned by `/pair/start`. Set it when the proxy host is not derivable from the request. |
 | `AGENT_BROWSER_OUT_DIR` | system temp dir | Where `browser_pdf` and tool results saved with `filename` write their files. |
 | `AGENT_BROWSER_DROP_DIR` | unset (file drops disabled) | Directory of files available to `browser_drop`. Files must be direct children, with no symlinks; maximum 8 files and 10 MiB total per call. Mount only files intended for browser upload. MIME data-only drops remain available with a 1 MiB limit. |
@@ -203,6 +204,17 @@ The template mounted at `BROWSER_EXTENSION_ZIP` stays read-only and untouched; t
 patched archive is built in memory and cached until the template or the URL changes.
 Without `BROWSER_PUBLIC_WS_URL` the template is served byte for byte, and no token is
 ever written into the archive — authentication comes from pairing.
+
+## Agent tab lifetime
+
+HTTP sessions track only tabs they opened. `AGENT_BROWSER_TAB_IDLE_MINUTES` is
+60 by default; `0` disables cleanup. `keepOpenMinutes` on new/switch tab retains
+a tracked tab for up to 1440 minutes. User-created tabs are never adopted merely
+by switching to them. Automatic and explicit closing by ID require an extension
+that announces `closeById` and echoes the closed ID; legacy extensions fail closed.
+Reconnects invalidate ownership, so old tabs remain open rather than risking an
+ID reused by Chrome. Browser selection is pinned per MCP session after its first
+call; an explicit `connection` argument changes that session's target.
 
 ## Tools
 
