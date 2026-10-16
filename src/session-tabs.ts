@@ -14,7 +14,17 @@
  *     session's — also one whose session already ended (a payment tab held open for Dani's tap
  *     with keepOpenMinutes): it gets an error asking it to open or pick one;
  *   - the server's own calls (the tab reaper closing idle tabs) go through the same queue via
- *     `system`, and their closes are seen too.
+ *     `system`, and their closes are seen too;
+ *   - a tab belongs to the session that opened it, as the tab reaper records it (the single source
+ *     of ownership: this file keeps none). Acting on another live session's tab — by its own
+ *     `tabId`, or by a switch/close/send-to-back that names it — answers TAB_OWNED without
+ *     sending anything; browser_claim_tab hands the tab over. Tabs nobody opened (the user's) and
+ *     tabs whose session ended stay adoptable;
+ *   - on a browser whose extension announces `windowPerSession` (browser_list_tabs), each session
+ *     opens its tabs in a window of its own, created in the background: `windowOf` remembers it,
+ *     browser_new_tab carries it and the answer refreshes it (a window that died is replaced by
+ *     the extension). A session that acts without a tab gets one opened first, instead of
+ *     latching onto the user's active tab. Browsers without the capability behave as before.
  */
 import type { Context, ExtensionResponse, ToolName } from './types.js';
 import { logger } from './utils/logger.js';
@@ -31,10 +41,33 @@ const NOT_ROUTED = new Set<ToolName>([
 /** Commands that do not use the tab and need not wait for the browser's queue. */
 const NOT_QUEUED = new Set<ToolName>(['browser_wait'] as ToolName[]);
 
+/** Tab ownership, served by the tab reaper (src/tab-reaper.ts). */
+export interface TabOwnership {
+  ownerOf(connectionId: string, tabId: number): { sessionId: string; sessionClosed: boolean } | undefined;
+  claim(connectionId: string, tabId: number, sessionId: string): boolean;
+}
+
+/** Tab-management commands name their own tab in `tabId`; the others take it as an explicit target. */
+const NAMES_TAB = new Set<ToolName>(['browser_switch_tab', 'browser_close_tab', 'browser_send_to_back'] as ToolName[]);
+
+/** Whether a command may carry an explicit `tabId` that is not part of its own arguments. */
+export function acceptsExplicitTab(type: string): boolean {
+  return !NOT_ROUTED.has(type as ToolName) && !NAMES_TAB.has(type as ToolName) && type !== 'browser_claim_tab';
+}
+
+export interface RouteOptions {
+  /** `tabId` the caller asked for on a command that does not have one of its own. */
+  explicitTabId?: number;
+}
+
 export interface SessionTabs {
-  route(context: Context, sessionId: string | undefined, connectionId: string): Context;
+  /** Reserve one browser for a complete cleanup transaction. Sends inside must be raw. */
+  exclusive<T>(connectionId: string, run: () => Promise<T>): Promise<T>;
+  /** For tests and diagnostics: the window a session opens its tabs in on a browser. */
+  windowOf(sessionId: string, connectionId: string): number | undefined;
+  route(context: Context, sessionId: string | undefined, connectionId: string, options?: RouteOptions): Context;
   /** The server's own calls to a browser (tab reaper): queued like the sessions', closes observed. */
-  system(context: Context, connectionId: string): Context;
+  system(context: Context, connectionId: string, alreadyExclusive?: boolean): Context;
   sessionClosed(sessionId: string): void;
   /** For tests and diagnostics: the tab a session works in on a browser. */
   tabOf(sessionId: string, connectionId: string): number | undefined;
@@ -42,11 +75,16 @@ export interface SessionTabs {
 
 const key = (sessionId: string, connectionId: string) => `${sessionId}\u0000${connectionId}`;
 
-export function createSessionTabs(): SessionTabs {
+const short = (sessionId: string) => sessionId.slice(0, 8);
+
+export function createSessionTabs(ownership?: TabOwnership): SessionTabs {
   const tabs = new Map<string, number>();
   /** What the extension of each browser is connected to, as far as this server routed it. */
   const connected = new Map<string, { tabId: number; sessionId: string }>();
   const queues = new Map<string, Promise<unknown>>();
+  const windows = new Map<string, number>();
+  /** Per browser connection: whether its extension gives each session a window (probed once per connect). */
+  const windowCapable = new Map<string, { connectedAt: number; windowPerSession: boolean }>();
 
   function queued<T>(connectionId: string, run: () => Promise<T>): Promise<T> {
     const tail = queues.get(connectionId) ?? Promise.resolve();
@@ -60,6 +98,16 @@ export function createSessionTabs(): SessionTabs {
     if (!response.success) {
       if (response.error?.code === 'TAB_GONE' && sessionId) forget(sessionId, connectionId);
       return;
+    }
+    if (type === 'browser_close_window') {
+      for (const id of Array.isArray(result.closedTabIds) ? result.closedTabIds : []) if (typeof id === 'number') closed(connectionId, id);
+      for (const [k, w] of [...windows]) if (w === result.windowId && k.endsWith(`\u0000${connectionId}`)) windows.delete(k);
+      return;
+    }
+    if (type === 'browser_new_tab' && sessionId) {
+      const tab = (result.tab ?? {}) as { windowId?: unknown };
+      const windowId = typeof result.windowId === 'number' ? result.windowId : tab.windowId;
+      if (typeof windowId === 'number') windows.set(key(sessionId, connectionId), windowId);
     }
     if (!sessionId) {
       if (type === 'browser_close_tab') closed(connectionId, typeof result.tabId === 'number' ? result.tabId : undefined);
@@ -83,6 +131,18 @@ export function createSessionTabs(): SessionTabs {
     if (connected.get(connectionId)?.tabId === tabId) connected.delete(connectionId);
   }
 
+  async function windowPerSession(context: Context, connectionId: string): Promise<boolean> {
+    const connectedAt = context.listConnections?.().find((c) => c.connectionId === connectionId)?.connectedAt ?? 0;
+    const known = windowCapable.get(connectionId);
+    if (known && known.connectedAt === connectedAt) return known.windowPerSession;
+    const listing = await context.send('browser_list_tabs').catch(() => undefined);
+    const raw = listing?.success ? (listing.result as { windowPerSession?: unknown } | undefined) : undefined;
+    const announced = !Array.isArray(raw) && raw?.windowPerSession === true;
+    // A failed probe is not cached: the next command asks again.
+    if (listing?.success) windowCapable.set(connectionId, { connectedAt, windowPerSession: announced });
+    return announced;
+  }
+
   function adopt(sessionId: string, connectionId: string, tabId: number) {
     tabs.set(key(sessionId, connectionId), tabId);
     connected.set(connectionId, { tabId, sessionId });
@@ -94,17 +154,86 @@ export function createSessionTabs(): SessionTabs {
     if (tabId !== undefined && connected.get(connectionId)?.tabId === tabId) connected.delete(connectionId);
   }
 
-  function route(context: Context, sessionId: string | undefined, connectionId: string): Context {
+  /** TAB_OWNED when the tab belongs to another live session; undefined when this one may act in it. */
+  function ownedByOther(sessionId: string, connectionId: string, tabId: number): ExtensionResponse | undefined {
+    const owner = ownership?.ownerOf(connectionId, tabId);
+    if (!owner || owner.sessionId === sessionId || owner.sessionClosed) return undefined;
+    return {
+      id: '',
+      success: false,
+      error: {
+        code: 'TAB_OWNED',
+        message:
+          `TAB_OWNED: la pestaña ${tabId} es de la sesión ${short(owner.sessionId)} ` +
+          `(tab ${tabId} belongs to session ${short(owner.sessionId)}); toma el control con browser_claim_tab`,
+      },
+    };
+  }
+
+  async function claimTab(context: Context, sessionId: string | undefined, connectionId: string, tabId: number): ReturnType<NonNullable<Context['claimTab']>> {
+    if (!sessionId || !ownership) return { ok: false, message: 'browser_claim_tab needs an MCP session over the HTTP transport.' };
+    const listing = await context.send('browser_list_tabs');
+    const raw = listing.result as { tabs?: Array<{ id: number }> } | Array<{ id: number }> | undefined;
+    const live = Array.isArray(raw) ? raw : raw?.tabs;
+    if (!listing.success || !Array.isArray(live) || !live.some((tab) => tab.id === tabId)) {
+      return { ok: false, message: `Tab ${tabId} is no longer available; list tabs again before claiming it.` };
+    }
+    const owner = ownership.ownerOf(connectionId, tabId);
+    if (!owner) {
+      return {
+        ok: false,
+        message:
+          `Tab ${tabId} is not one an agent opened (it may be the user's own), so there is nothing to claim: ` +
+          'adopt it with browser_switch_tab.',
+      };
+    }
+    if (!ownership.claim(connectionId, tabId, sessionId)) return { ok: false, message: `Tab ${tabId} is no longer tracked.` };
+    if (owner.sessionId !== sessionId) {
+      // The session that had it no longer works in it.
+      for (const [k, t] of [...tabs]) if (t === tabId && k.endsWith(`\u0000${connectionId}`) && !k.startsWith(`${sessionId}\u0000`)) tabs.delete(k);
+    }
+    adopt(sessionId, connectionId, tabId);
+    return { ok: true };
+  }
+
+  function route(context: Context, sessionId: string | undefined, connectionId: string, options: RouteOptions = {}): Context {
     return {
       ...context,
+      claimTab: (tabId) => queued(connectionId, () => claimTab(context, sessionId, connectionId, tabId)),
       send: (type, payload = {}, ...rest) => {
         const run = async (): Promise<ExtensionResponse> => {
+          if (sessionId) {
+            const named = NAMES_TAB.has(type) && typeof payload.tabId === 'number' ? payload.tabId : options.explicitTabId;
+            const target = named ?? (NOT_ROUTED.has(type) ? undefined : tabs.get(key(sessionId, connectionId)));
+            const refused = target === undefined ? undefined : ownedByOther(sessionId, connectionId, target);
+            if (refused) return refused;
+          }
           if (!sessionId || NOT_ROUTED.has(type)) {
-            const response = await context.send(type, payload, ...rest);
+            let sent = payload;
+            if (sessionId && type === 'browser_new_tab' && await windowPerSession(context, connectionId)) {
+              const windowId = windows.get(key(sessionId, connectionId));
+              if (windowId !== undefined && sent.windowId === undefined) sent = { ...payload, windowId };
+            }
+            const response = await context.send(type, sent, ...rest);
             if (sessionId) observe(sessionId, connectionId, type, payload, response);
             return response;
           }
-          const mine = tabs.get(key(sessionId, connectionId));
+          const explicit = acceptsExplicitTab(type) ? options.explicitTabId : undefined;
+          if (explicit !== undefined) {
+            // An explicit target is sent as it is: it does not become the session's tab.
+            const response = await context.send(type, { ...payload, targetTabId: explicit }, ...rest);
+            observe(sessionId, connectionId, type, payload, response);
+            return response;
+          }
+          let mine = tabs.get(key(sessionId, connectionId));
+          if (mine === undefined && await windowPerSession(context, connectionId)) {
+            // The session acts without a tab: open its own (in its window) rather than use the user's.
+            const windowId = windows.get(key(sessionId, connectionId));
+            const opened = await context.send('browser_new_tab', { url: 'about:blank', ...(windowId !== undefined ? { windowId } : {}) });
+            observe(sessionId, connectionId, 'browser_new_tab', { url: 'about:blank' }, opened);
+            if (!opened.success) return opened;
+            mine = tabs.get(key(sessionId, connectionId));
+          }
           if (mine === undefined) {
             const other = connected.get(connectionId);
             if (other && other.sessionId !== sessionId) {
@@ -131,23 +260,34 @@ export function createSessionTabs(): SessionTabs {
     };
   }
 
-  function system(context: Context, connectionId: string): Context {
+  function system(context: Context, connectionId: string, alreadyExclusive = false): Context {
     return {
       ...context,
-      send: (type, payload = {}, ...rest) => queued(connectionId, async () => {
-        const response = await context.send(type, payload, ...rest);
-        observe(undefined, connectionId, type, payload, response);
-        return response;
-      }),
+      send: (type, payload = {}, ...rest) => {
+        const run = async () => {
+          const response = await context.send(type, payload, ...rest);
+          observe(undefined, connectionId, type, payload, response);
+          return response;
+        };
+        return alreadyExclusive ? run() : queued(connectionId, run);
+      },
     };
   }
 
   function sessionClosed(sessionId: string) {
     for (const k of [...tabs.keys()]) if (k.startsWith(`${sessionId}\u0000`)) tabs.delete(k);
+    for (const k of [...windows.keys()]) if (k.startsWith(`${sessionId}\u0000`)) windows.delete(k);
     // The connected tab stays this session's until it closes or someone picks it: it may be a
     // tab held open for Dani (keepOpenMinutes), and a session without a tab must not act in it.
     logger.info(`[session-tabs] session ${sessionId} closed: its tab routing is forgotten`);
   }
 
-  return { route, system, sessionClosed, tabOf: (s, c) => tabs.get(key(s, c)) };
+  return {
+    route,
+    exclusive: queued,
+    system,
+    sessionClosed,
+    tabOf: (s, c) => tabs.get(key(s, c)),
+    windowOf: (s, c) => windows.get(key(s, c)),
+  };
 }

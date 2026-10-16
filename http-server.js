@@ -14,7 +14,7 @@ import { patchZipConfig } from './src/extension-zip.ts';
 import { extensionZipPath, readPublishedVersion } from './src/published-extension.ts';
 import { parseLabels, nameOf, resolveTarget, findConnection } from './src/connection-target.ts';
 import { createTabReaper, idleMinutesFromEnv } from './src/tab-reaper.ts';
-import { createSessionTabs } from './src/session-tabs.ts';
+import { createSessionTabs, acceptsExplicitTab } from './src/session-tabs.ts';
 
 const PORT = Number(process.env.MCP_HTTP_PORT || 8000);
 const WS_PORT = Number(process.env.BROWSER_WS_PORT || 8765);
@@ -22,6 +22,12 @@ const HTTP_HOST = process.env.MCP_HTTP_HOST || '127.0.0.1';
 // What the extension CI published here (src/published-extension.ts): latest.json and its zip.
 const EXTENSION_DIR = process.env.BROWSER_EXTENSION_DIR || '/data/extension';
 const WS_PATH = process.env.BROWSER_WS_PATH || '/';
+
+const TAB_FIELD = {
+  type: 'integer',
+  description:
+    'Tab to run this command in (see browser_list_tabs). Without it: this session\'s own tab. A tab another session opened answers TAB_OWNED; take it over with browser_claim_tab.',
+};
 
 const CONNECTION_FIELD = {
   type: 'string',
@@ -49,20 +55,24 @@ const allTools = getAllTools();
 const toolMap = new Map(allTools.map((tool) => [tool.schema.name, tool]));
 
 // Each MCP session works in its own tab, even with several on one browser (src/session-tabs.ts).
-const sessionTabs = createSessionTabs();
+// Who owns each tab is the tab reaper's registry (below); session-tabs only asks it.
+const sessionTabs = createSessionTabs({
+  ownerOf: (connectionId, tabId) => tabReaper.ownerOf(connectionId, tabId),
+  claim: (connectionId, tabId, sessionId) => tabReaper.claim(connectionId, tabId, sessionId),
+});
 
 // Agent tabs close when their MCP session ends or after this long without use (src/tab-reaper.ts).
+// The reaper always exists: its registry is what says whose a tab is. AGENT_BROWSER_TAB_IDLE_MINUTES=0
+// only turns the closing (and the sweep timer) off.
 const TAB_IDLE_MINUTES = idleMinutesFromEnv();
-const tabReaper = TAB_IDLE_MINUTES > 0
-  ? createTabReaper({
-      idleMs: TAB_IDLE_MINUTES * 60_000,
-      // Through the session queue: a close never lands in the middle of a session's command.
-      send: (connectionId, type, payload) =>
-        sessionTabs.system(context.forConnection(connectionId), connectionId).send(type, payload),
-      listConnections: () => context.listConnections(),
-    })
-  : null;
-if (tabReaper) {
+const tabReaper = createTabReaper({
+  idleMs: TAB_IDLE_MINUTES * 60_000,
+  // Reserve the queue once for listing, revalidation and closing (never nest queued sends).
+  exclusive: (connectionId, run) => sessionTabs.exclusive(connectionId, run),
+  send: (connectionId, type, payload) => sessionTabs.system(context.forConnection(connectionId), connectionId, true).send(type, payload),
+  listConnections: () => context.listConnections(),
+});
+if (TAB_IDLE_MINUTES > 0) {
   setInterval(() => void tabReaper.sweep(), 5 * 60_000).unref();
 }
 
@@ -88,6 +98,7 @@ function annotateToolSchema(tool) {
     annotated.inputSchema.properties = {};
   }
   annotated.inputSchema.properties.connection ??= { ...CONNECTION_FIELD };
+  if (acceptsExplicitTab(annotated.name)) annotated.inputSchema.properties.tabId ??= { ...TAB_FIELD };
   return annotated;
 }
 
@@ -108,12 +119,20 @@ function textContent(text, isError) {
 async function callTool(name, rawArgs, sessionId) {
   const tool = toolMap.get(name);
   if (!tool) return textContent(`Unknown tool: ${name}`, true);
-  tabReaper?.touchSession(sessionId);
+  tabReaper.touchSession(sessionId);
 
   const args = { ...(rawArgs ?? {}) };
   const requested =
     typeof args.connection === 'string' && args.connection.trim() ? args.connection.trim() : undefined;
   delete args.connection;
+  // An explicit tab is handled here for every command that has no `tabId` of its own, so the
+  // tools' zod schemas never see it (src/session-tabs.ts checks who owns it).
+  let explicitTabId;
+  if (acceptsExplicitTab(name) && args.tabId !== undefined) {
+    if (!Number.isInteger(args.tabId)) return textContent('tabId must be an integer', true);
+    explicitTabId = args.tabId;
+    delete args.tabId;
+  }
 
   if (name === 'browser_list_connections') {
     const mine = sessionId ? sessionDefaults.get(sessionId) : undefined;
@@ -155,9 +174,10 @@ async function callTool(name, rawArgs, sessionId) {
   if (!target.ok) return textContent(target.error, true);
   if (target.sticky && sessionId) sessionDefaults.set(sessionId, target.connectionId);
 
-  const bound = sessionTabs.route(context.forConnection(target.connectionId), sessionId, target.connectionId);
   const keepOpenMinutes = typeof args.keepOpenMinutes === 'number' ? args.keepOpenMinutes : undefined;
-  return tool.handle(tabReaper ? tabReaper.track(bound, sessionId, target.connectionId, keepOpenMinutes) : bound, args);
+  // The reaper sits under the router: it sees what is sent to the browser (never a refused command).
+  const tracked = tabReaper.track(context.forConnection(target.connectionId), sessionId, target.connectionId, keepOpenMinutes);
+  return tool.handle(sessionTabs.route(tracked, sessionId, target.connectionId, { explicitTabId }), args);
 }
 
 function createMcpServer() {
@@ -437,7 +457,7 @@ app.post('/mcp', async (req, res) => {
       });
       transport.onclose = () => {
         if (transport.sessionId) {
-          void tabReaper?.sessionClosed(transport.sessionId);
+          void tabReaper.sessionClosed(transport.sessionId);
           sessionTabs.sessionClosed(transport.sessionId);
           transports.delete(transport.sessionId);
           servers.delete(transport.sessionId);
