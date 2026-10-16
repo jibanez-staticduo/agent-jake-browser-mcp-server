@@ -215,9 +215,27 @@ that announces `closeById` and echoes the closed ID; legacy extensions fail clos
 Reconnects invalidate ownership, so old tabs remain open rather than risking an
 ID reused by Chrome. Shared tabs remain tracked while a participating MCP session
 is live, until all participants end or the idle timeout expires. While cleanup
-awaits a close acknowledgement, new commands on that browser are rejected for
-retry instead of adopting a tab being closed. Browser selection is pinned per MCP session after its first
+awaits a close acknowledgement, HTTP commands and claims wait in the same browser
+queue; a claim succeeds only if the tracked tab is still available. Browser selection is pinned per MCP session after its first
 call; an explicit `connection` argument changes that session's target.
+
+Each HTTP session routes page commands to its own tab. Optional `tabId` targets
+another tab for one command without changing that routing. A live agent-owned
+tab returns `TAB_OWNED` to another session; `browser_claim_tab` explicitly transfers
+ownership. This is cooperative session isolation, not a tenant authorization boundary.
+Ownership remains active when cleanup is disabled. With an extension announcing
+`windowPerSession`, tabs open in a session window in the background and the first
+page command opens an `about:blank` tab lazily. `switchTo` and
+`browser_send_to_back` remain accepted for compatibility. Older extensions retain
+per-tab routing and ownership without per-session windows.
+
+Window cleanup requires `closeWindow`, a window containing only due tracked tabs,
+and a valid echo containing only requested IDs. Missing IDs are reconciled with a
+fresh listing so tabs removed or moved by the user do not disable future cleanup.
+After reconnect, the previous window ID is only a hint: the extension must verify
+its live browser witness before reusing it. Tab routing and cleanup ownership are
+always discarded on reconnect. Deploy the updated extension before this server.
+
 
 ## Tools
 
@@ -263,7 +281,8 @@ call; an explicit `connection` argument changes that session's target.
 |------|-------------|
 | `browser_new_tab` | Open a URL in a new tab |
 | `browser_list_tabs` | List all open browser tabs |
-| `browser_switch_tab` | Switch to a different tab |
+| `browser_switch_tab` | Connect to a different tab without activating it |
+| `browser_claim_tab` | Explicitly transfer an agent tab to this HTTP session |
 | `browser_close_tab` | Close a browser tab |
 
 ### Utility (3 tools)

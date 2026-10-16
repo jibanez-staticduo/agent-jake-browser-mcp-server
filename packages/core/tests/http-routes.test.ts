@@ -244,9 +244,11 @@ describe('tools/list annotation', () => {
     });
     expect(res.status).toBe(200);
     const tools = res.json.result.tools as Array<{ name: string; inputSchema: any }>;
-    expect(tools).toHaveLength(39);
+    expect(tools).toHaveLength(40);
     expect(tools.map((t) => t.name)).not.toContain('browser_fill_secret');
     expect(tools.map((t) => t.name)).toContain('browser_list_connections');
+    expect(tools.find((t) => t.name === 'browser_navigate')?.inputSchema.properties.tabId).toMatchObject({ type: 'integer', minimum: 1 });
+    expect(tools.map((t) => t.name)).toContain('browser_claim_tab');
     for (const tool of tools) {
       expect(tool.inputSchema.properties.connection, tool.name).toEqual({
         type: 'string',
@@ -372,18 +374,18 @@ describe('tools/call through an MCP session', () => {
       connection: 'chrome-http',
     });
     expect(result.isError).toBeUndefined();
-    expect(extension.messages).toHaveLength(1);
-    expect(Object.keys(extension.messages[0]).sort()).toEqual(['id', 'payload', 'type']);
-    expect(extension.messages[0].id).toEqual(expect.any(String));
-    expect(extension.messages[0]).toMatchObject({
+    expect(extension.messages.map((m) => m.type)).toEqual(['browser_list_tabs', 'browser_navigate']);
+    expect(Object.keys(extension.messages[1]).sort()).toEqual(['id', 'payload', 'type']);
+    expect(extension.messages[1].id).toEqual(expect.any(String));
+    expect(extension.messages[1]).toMatchObject({
       type: 'browser_navigate',
       payload: { url: 'https://example.com' },
     });
-    expect(JSON.stringify(extension.messages[0])).not.toContain('connection');
+    expect(JSON.stringify(extension.messages[1])).not.toContain('connection');
 
     // Without an explicit id the single open connection is targeted.
     await mcpCall('browser_reload', {});
-    expect(extension.messages).toHaveLength(2);
+    expect(extension.messages).toHaveLength(3);
 
     extension.socket.close();
   }, 30000);
@@ -408,19 +410,59 @@ describe('agent tabs when the MCP session ends', () => {
       const initial = await mcpCall('browser_reload', {}, first);
       expect(initial.isError).toBeUndefined();
       expect(a.messages).toHaveLength(0);
-      expect(b.messages).toHaveLength(1);
+      expect(b.messages).toHaveLength(2);
       await mcpCall('browser_reload', { connection: 'stable-a' }, second);
       await Promise.all([
         mcpCall('browser_reload', {}, first),
         mcpCall('browser_reload', {}, second),
       ]);
-      expect(a.messages).toHaveLength(2);
-      expect(b.messages).toHaveLength(2);
+      expect(a.messages).toHaveLength(3);
+      expect(b.messages).toHaveLength(3);
     } finally {
       a.socket.close();
       b.socket.close();
       await request(primary, 'DELETE', '/mcp', { headers: { 'mcp-session-id': first } });
       await request(primary, 'DELETE', '/mcp', { headers: { 'mcp-session-id': second } });
+    }
+  });
+
+  it('isolates two sessions, accepts an explicit tab target and transfers ownership through claim', async () => {
+    let nextId = 100;
+    const tabs = new Map<number, number>();
+    const extension = await connectExtension(primary, pairedToken, 'owned-tabs', undefined, (message) => {
+      const payload = message.payload as Record<string, unknown>;
+      if (message.type === 'browser_list_tabs') return {
+        tabs: [...tabs].map(([id, windowId]) => ({ id, windowId, url: 'about:blank' })),
+        closeById: true, closeWindow: true, windowPerSession: true,
+      };
+      if (message.type === 'browser_new_tab') {
+        const id = nextId++; const windowId = Number(payload.windowId ?? id + 50);
+        tabs.set(id, windowId);
+        return { tab: { id, windowId, url: 'about:blank', connected: true }, windowId };
+      }
+      if (message.type === 'browser_close_window') {
+        for (const id of payload.tabIds as number[]) tabs.delete(id);
+        return { windowId: payload.windowId, closedTabIds: payload.tabIds };
+      }
+      return { url: 'https://example.com', title: 'test' };
+    });
+    const a = await openMcpSession(primary); const b = await openMcpSession(primary);
+    try {
+      expect((await mcpCall('browser_navigate', { connection: 'owned-tabs', url: 'https://a.test' }, a)).isError).toBeUndefined();
+      expect((await mcpCall('browser_navigate', { connection: 'owned-tabs', url: 'https://b.test' }, b)).isError).toBeUndefined();
+      const before = extension.messages.length;
+      expect((await mcpCall('browser_navigate', { tabId: 100, url: 'https://forbidden.test' }, b)).isError).toBe(true);
+      expect(extension.messages).toHaveLength(before);
+      expect((await mcpCall('browser_claim_tab', { tabId: 100 }, b)).isError).toBeUndefined();
+      expect((await mcpCall('browser_navigate', { tabId: 100, url: 'https://claimed.test' }, b)).isError).toBeUndefined();
+      expect(extension.messages.at(-1)).toMatchObject({ type: 'browser_navigate', payload: { targetTabId: 100 } });
+      expect((await mcpCall('browser_navigate', { tabId: 100, url: 'https://old-owner.test' }, a)).isError).toBe(true);
+      expect((await mcpCall('browser_navigate', { tabId: 0, url: 'https://invalid.test' }, b)).isError).toBe(true);
+    } finally {
+      await request(primary, 'DELETE', '/mcp', { headers: { 'mcp-session-id': a } });
+      await request(primary, 'DELETE', '/mcp', { headers: { 'mcp-session-id': b } });
+      await expect.poll(() => tabs.size).toBe(0);
+      extension.socket.close();
     }
   });
 

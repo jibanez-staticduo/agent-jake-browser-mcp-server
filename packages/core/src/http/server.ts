@@ -17,6 +17,7 @@ import { getSharedTokenStore } from '../token-store.js';
 import { createPairingStore } from '../pairing-store.js';
 import { patchZipConfig } from '../extension-zip.js';
 import { createTabReaper, idleMinutesFromEnv } from '../tab-reaper.js';
+import { createSessionTabs, acceptsExplicitTab } from '../session-tabs.js';
 
 
 export interface HttpServerOptions {
@@ -62,14 +63,27 @@ export function createHttpServer(options: HttpServerOptions = {}): HttpServer {
 
   // Agent tabs close when their MCP session ends or after this long without use (packages/core/src/tab-reaper.ts).
   const TAB_IDLE_MINUTES = idleMinutesFromEnv();
-  const tabReaper = TAB_IDLE_MINUTES > 0
-    ? createTabReaper({
-        idleMs: TAB_IDLE_MINUTES * 60_000,
-        send: (connectionId, type, payload) => context.send(type, payload, connectionId),
-        listConnections: () => context.listConnections(),
-      })
-    : null;
-  const reaperTimer = tabReaper
+  const sessionTabs = createSessionTabs({
+    ownerOf: (connectionId, tabId) => tabReaper.ownerOf(connectionId, tabId),
+    claim: (connectionId, tabId, sessionId) => tabReaper.claim(connectionId, tabId, sessionId),
+  });
+  const tabReaper = createTabReaper({
+    idleMs: TAB_IDLE_MINUTES * 60_000,
+    send: async (connectionId, type, payload) => {
+      const response = await context.forConnection(connectionId).send(type, payload);
+      const result = response.result as { tabId?: unknown; windowId?: unknown; closedTabIds?: unknown } | undefined;
+      const validTab = type === 'browser_close_tab' && result?.tabId === payload?.tabId;
+      const ids = payload?.tabIds;
+      const echoed = result?.closedTabIds;
+      const validWindow = type === 'browser_close_window' && result?.windowId === payload?.windowId &&
+        Array.isArray(ids) && Array.isArray(echoed) && echoed.every((id) => ids.includes(id)) && new Set(echoed).size === echoed.length;
+      if (validTab || validWindow) sessionTabs.observeSystem(connectionId, type, response);
+      return response;
+    },
+    exclusive: (connectionId, run) => sessionTabs.exclusive(connectionId, run),
+    listConnections: () => context.listConnections(),
+  });
+  const reaperTimer = TAB_IDLE_MINUTES > 0
     ? setInterval(() => void tabReaper.sweep(), 5 * 60_000)
     : undefined;
   reaperTimer?.unref();
@@ -97,6 +111,12 @@ export function createHttpServer(options: HttpServerOptions = {}): HttpServer {
       annotated.inputSchema.properties = {};
     }
     (annotated.inputSchema.properties as Record<string, unknown>).connection ??= { ...CONNECTION_FIELD };
+    if (acceptsExplicitTab(annotated.name)) {
+      (annotated.inputSchema.properties as Record<string, unknown>).tabId ??= {
+        type: 'integer', minimum: 1,
+        description: 'Explicit tab target; defaults to this session tab. Claim another agent tab with browser_claim_tab.',
+      };
+    }
     return annotated;
   }
 
@@ -124,6 +144,12 @@ export function createHttpServer(options: HttpServerOptions = {}): HttpServer {
       typeof args.connection === 'string' && args.connection.trim() ? args.connection.trim() : undefined;
     let connection = explicitConnection ?? (sessionId ? sessionTargets.get(sessionId) : undefined);
     delete args.connection;
+    let explicitTabId: number | undefined;
+    if (acceptsExplicitTab(name) && args.tabId !== undefined) {
+      if (!Number.isSafeInteger(args.tabId) || (args.tabId as number) <= 0) return textContent('tabId must be a positive safe integer.', true);
+      explicitTabId = args.tabId as number;
+      delete args.tabId;
+    }
 
     if (tool.serverSide) {
       return tool.handle(context, args);
@@ -159,9 +185,9 @@ export function createHttpServer(options: HttpServerOptions = {}): HttpServer {
     }
     if (sessionId) sessionTargets.set(sessionId, connection);
     const bound = context.forConnection(connection);
-    if (!tabReaper) return tool.handle(bound, args);
     const keepOpenMinutes = typeof args.keepOpenMinutes === 'number' ? args.keepOpenMinutes : undefined;
-    return tool.handle(tabReaper.track(bound, sessionId, connection, keepOpenMinutes), args);
+    const tracked = tabReaper.track(bound, sessionId, connection, keepOpenMinutes);
+    return tool.handle(sessionTabs.route(tracked, sessionId, connection, { explicitTabId }), args);
   }
 
   function createMcpServer() {
@@ -403,7 +429,8 @@ export function createHttpServer(options: HttpServerOptions = {}): HttpServer {
         });
         transport.onclose = () => {
           if (transport.sessionId) {
-            void tabReaper?.sessionClosed(transport.sessionId);
+            sessionTabs.sessionClosed(transport.sessionId);
+            void tabReaper.sessionClosed(transport.sessionId);
             sessionTargets.delete(transport.sessionId);
             transports.delete(transport.sessionId);
             servers.delete(transport.sessionId);

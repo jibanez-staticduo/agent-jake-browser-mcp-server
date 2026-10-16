@@ -28,8 +28,8 @@ export const newTabTool: Tool = createTool({
   name: 'browser_new_tab',
   description:
     'Open a URL in a new browser tab and connect to it. The tab opens in the ' +
-    'BACKGROUND so it does not steal the user\'s view; use switchTo: true only ' +
-    'when the user is meant to see it. Tabs you open close by themselves when your ' +
+    'BACKGROUND in this session\'s window so it does not steal the user\'s view. ' +
+    'Tabs you open close by themselves when your ' +
     'MCP session ends or after the configured idle timeout (60 minutes by default) when cleanup is enabled; keepOpenMinutes holds one open ' +
     'longer (e.g. a payment screen waiting for a person).',
   schema: z.object({
@@ -37,7 +37,7 @@ export const newTabTool: Tool = createTool({
     switchTo: z.boolean()
       .optional()
       .default(false)
-      .describe('Bring the new tab to the front after opening it (default: false, stays in background)'),
+      .describe('Deprecated; accepted for compatibility. Tabs remain in the background.'),
     keepOpenMinutes: KEEP_OPEN_MINUTES,
   }),
   async handle(context, params) {
@@ -109,7 +109,7 @@ export const listTabsTool: Tool = createTool({
 export const switchTabTool: Tool = createTool({
   name: 'browser_switch_tab',
   description:
-    'Switch to a different browser tab by its ID. With keepOpenMinutes, a tab this ' +
+    'Connect to a browser tab by ID without activating it. With keepOpenMinutes, a tab this ' +
     'session opened stays open that long even after the session ends.',
   schema: z.object({
     tabId: z.number().describe('ID of the tab to switch to'),
@@ -134,9 +134,7 @@ export const switchTabTool: Tool = createTool({
 export const sendToBackTool: Tool = createTool({
   name: 'browser_send_to_back',
   description:
-    'Hide the connected (or given) tab by activating another tab of its window, ' +
-    'giving the user their view back. Use browser_switch_tab to bring a tab to ' +
-    'the front when the user is meant to see it.',
+    'Deprecated; kept for compatibility. Session tabs stay in the background.',
   schema: z.object({
     tabId: z.number()
       .optional()
@@ -190,10 +188,22 @@ export const closeTabTool: Tool = createTool({
   },
 });
 
+export const claimTabTool: Tool = createTool({
+  name: 'browser_claim_tab',
+  description: 'Explicitly take ownership of a tab opened by another agent session. Subsequent commands use it.',
+  schema: z.object({ tabId: z.number().int().positive() }),
+  async handle(context, params) {
+    if (!context.claimTab) return errorResult('browser_claim_tab needs an MCP session over the HTTP transport.');
+    const claimed = await context.claimTab(params.tabId);
+    return claimed.ok ? textResult(`Tab ${params.tabId} is now yours`) : errorResult(claimed.message ?? 'Tab is unavailable.');
+  },
+});
+
 export const tabTools: Tool[] = [
   newTabTool,
   listTabsTool,
   switchTabTool,
+  claimTabTool,
   sendToBackTool,
   closeTabTool,
 ];
