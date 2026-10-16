@@ -88,10 +88,21 @@ export function createWSServer(options: WSServerOptions): WSServer {
   const tokenStore = options.tokenStore ?? getSharedTokenStore();
   const registry = new ConnectionRegistry();
   const pendingRequests = new Map<string, {
+    connectionId: string;
+    ws: WebSocket;
     resolve: (response: ExtensionResponse) => void;
     reject: (error: Error) => void;
     timeout: NodeJS.Timeout;
   }>();
+
+  function rejectPendingSocket(ws: WebSocket, reason: string): void {
+    for (const [id, pending] of pendingRequests) {
+      if (pending.ws !== ws) continue;
+      clearTimeout(pending.timeout);
+      pendingRequests.delete(id);
+      pending.reject(new Error(reason));
+    }
+  }
 
   // SECURITY: this used to listen on 0.0.0.0 with no auth and no origin check —
   // anyone on the LAN could impersonate the extension and pilot the browser.
@@ -146,6 +157,7 @@ export function createWSServer(options: WSServerOptions): WSServer {
     });
 
     if (replaced) {
+      rejectPendingSocket(replaced.ws, 'Extension connection replaced');
       logger.warn(
         `Connection ${connectionId} reconnected: closing stale socket (was open for ${Math.round(
           (Date.now() - replaced.connectedAt) / 1000,
@@ -166,10 +178,11 @@ export function createWSServer(options: WSServerOptions): WSServer {
     onConnection?.(ws, connectionId);
 
     ws.on('message', (data) => {
+      // A reconnect may leave buffered frames on its predecessor's socket.
+      if (registry.get(connectionId)?.ws !== ws) return;
       registry.touch(connectionId);
       try {
         const dataStr = data.toString();
-        logger.info('[WS] Raw message received, length:', dataStr.length);
 
         const rawMessage = JSON.parse(dataStr);
         if ((rawMessage as { type?: string })?.type === 'heartbeat') {
@@ -178,18 +191,20 @@ export function createWSServer(options: WSServerOptions): WSServer {
         }
 
         const message = rawMessage as ExtensionResponse;
-        logger.info('[WS] Parsed message id:', message.id, 'success:', message.success);
-        logger.info('[WS] Pending request IDs:', Array.from(pendingRequests.keys()));
 
         // Handle response to a pending request
         if (message.id && pendingRequests.has(message.id)) {
-          logger.info('[WS] Found matching pending request, resolving');
           const pending = pendingRequests.get(message.id)!;
+          if (pending.ws !== ws || pending.connectionId !== connectionId) {
+            logger.warn('[WS] Ignoring response from a different connection');
+            return;
+          }
+          logger.info('[WS] Found matching pending request, resolving');
           clearTimeout(pending.timeout);
           pendingRequests.delete(message.id);
           pending.resolve(message);
         } else {
-          logger.warn('[WS] No matching pending request for id:', message.id);
+          logger.warn('[WS] No matching pending request for response');
         }
 
         onMessage?.(message);
@@ -199,6 +214,7 @@ export function createWSServer(options: WSServerOptions): WSServer {
     });
 
     ws.on('close', () => {
+      rejectPendingSocket(ws, 'Extension disconnected');
       if (registry.remove(connectionId, ws)) {
         logger.info(`Extension disconnected (${connectionId})`);
         onDisconnection?.(connectionId);
@@ -254,6 +270,10 @@ export function createWSServer(options: WSServerOptions): WSServer {
         reject(resolutionError(connectionId));
         return;
       }
+      if (pendingRequests.has(message.id)) {
+        reject(new Error('Request id is already pending'));
+        return;
+      }
 
       logger.info(
         `[WS] Sending message id: ${message.id}, type: ${message.type} -> ${target.connectionId}`,
@@ -265,12 +285,11 @@ export function createWSServer(options: WSServerOptions): WSServer {
         reject(new Error(`Request timed out: ${message.type}`));
       }, 30000);
 
-      pendingRequests.set(message.id, { resolve, reject, timeout });
+      pendingRequests.set(message.id, { connectionId: target.connectionId, ws: target.ws, resolve, reject, timeout });
       registry.markUsed(target.connectionId);
       registry.touch(target.connectionId);
 
       const jsonStr = JSON.stringify(message);
-      logger.info('[WS] Sending JSON length:', jsonStr.length);
       target.ws.send(jsonStr);
     });
   }
