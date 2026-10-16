@@ -15,6 +15,16 @@ class FakeBrowser {
   connected: number | null = null;
   /** Behave like extension builds before agent-browser-extension#18: ignore the id, close the connected tab. */
   ignoresCloseId = false;
+  /** Windows, like agent-browser-extension windowPerSession: tab -> window, the user's tab 1 lives in window 1. */
+  windowMode = false;
+  /** Window mode, but the extension answers browser_close_window without saying which tabs it closed. */
+  noWindowEcho = false;
+  /** Window mode: the extension echoes only these ids (a partial close), instead of all it was given. */
+  echoOnly: number[] | null = null;
+  /** Window mode, but the listing does not announce closeWindow (an extension without it). */
+  noCloseWindow = false;
+  windowOfTab = new Map<number, number>([[1, 1]]);
+  nextWindow = 50;
   connectedAt = 1000;
   open = true;
   sent: Array<{ type: ToolName; payload: Record<string, unknown> }> = [];
@@ -40,12 +50,26 @@ class FakeBrowser {
         const id = this.nextId++;
         this.tabs.set(id, String(payload.url));
         this.connected = id;
+        if (this.windowMode) {
+          const windowId = typeof payload.windowId === 'number' ? payload.windowId : this.nextWindow++;
+          this.windowOfTab.set(id, windowId);
+          return ok({ tab: { id, url: payload.url, connected: true, windowId }, windowId, windowCreated: payload.windowId === undefined });
+        }
         return ok({ tab: { id, url: payload.url, connected: true } });
       }
       case 'browser_list_tabs': {
-        const tabs = [...this.tabs].map(([id, url]) => ({ id, url, title: '', active: false, connected: id === this.connected }));
+        const tabs = [...this.tabs].map(([id, url]) => ({
+          id, url, title: '', active: false, connected: id === this.connected,
+          ...(this.windowMode ? { windowId: this.windowOfTab.get(id) } : {}),
+        }));
         // Builds that close by id announce it; older ones answered a bare array.
-        return ok(this.ignoresCloseId ? tabs : { tabs, closeById: true });
+        if (this.ignoresCloseId) return ok(tabs);
+        return ok({ tabs, closeById: true, ...(this.windowMode && !this.noCloseWindow ? { closeWindow: true, windowPerSession: true } : {}) });
+      }
+      case 'browser_close_window': {
+        const ids = (payload.tabIds as number[] | undefined) ?? [];
+        for (const id of ids) this.tabs.delete(id);
+        return ok(this.noWindowEcho ? { closed: true } : { windowId: payload.windowId, closed: true, closedTabIds: this.echoOnly ?? ids });
       }
       case 'browser_switch_tab':
         this.connected = payload.tabId as number;
@@ -67,6 +91,10 @@ class FakeBrowser {
       default:
         return ok({});
     }
+  }
+
+  windowCloses(): Array<{ windowId: number; tabIds: number[] }> {
+    return this.sent.filter((m) => m.type === 'browser_close_window').map((m) => m.payload as { windowId: number; tabIds: number[] });
   }
 
   closes(): number[] {
@@ -325,5 +353,160 @@ describe('idleMinutesFromEnv', () => {
     expect(idleMinutesFromEnv({ AGENT_BROWSER_TAB_IDLE_MINUTES: '0' })).toBe(0);
     expect(idleMinutesFromEnv({ AGENT_BROWSER_TAB_IDLE_MINUTES: '15' })).toBe(15);
     expect(idleMinutesFromEnv({ AGENT_BROWSER_TAB_IDLE_MINUTES: 'nope' })).toBe(60);
+  });
+});
+
+describe('tab reaper: windows', () => {
+  beforeEach(() => {
+    browser.windowMode = true;
+  });
+
+  it('closes the window of a session with one browser_close_window when the session ends', async () => {
+    const first = await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
+    const windowId = (first.result as { windowId: number }).windowId;
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/two', windowId });
+    await call('s2', 'browser_new_tab', { url: 'https://bank.example/' });
+
+    await reaper.sessionClosed('s1');
+
+    expect(browser.windowCloses()).toEqual([{ windowId, tabIds: [100, 101] }]);
+    expect(browser.closes()).toEqual([]);
+    expect([...browser.tabs.keys()].sort()).toEqual([1, 102]);
+    expect(reaper.tracked().map((t) => t.tabId)).toEqual([102]);
+  });
+
+  it('closes the window after an hour idle, not before', async () => {
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
+    clock = HOUR - 1;
+    expect(await reaper.sweep()).toBe(0);
+    clock = HOUR;
+    expect(await reaper.sweep()).toBe(1);
+    expect(browser.windowCloses()).toHaveLength(1);
+    expect(browser.closes()).toEqual([]);
+  });
+
+  it('a tab held with keepOpenMinutes keeps its window: only the due tab goes', async () => {
+    const first = await call('s1', 'browser_new_tab', { url: 'https://pay.example/' }, 120);
+    const windowId = (first.result as { windowId: number }).windowId;
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/', windowId });
+
+    await reaper.sessionClosed('s1');
+
+    expect(browser.windowCloses()).toEqual([]);
+    expect(browser.closes()).toEqual([101]);
+    expect(browser.tabs.has(100)).toBe(true);
+
+    clock = 120 * 60_000;
+    await reaper.sweep();
+    expect(browser.windowCloses()).toEqual([{ windowId, tabIds: [100] }]);
+  });
+
+  it('a window that also holds a tab the agent did not open loses only its own tabs', async () => {
+    const first = await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
+    const windowId = (first.result as { windowId: number }).windowId;
+    browser.tabs.set(7, 'https://dani.example/dragged'); // the user dragged a tab in
+    browser.windowOfTab.set(7, windowId);
+
+    await reaper.sessionClosed('s1');
+
+    expect(browser.windowCloses()).toEqual([]);
+    expect(browser.closes()).toEqual([100]);
+    expect(browser.tabs.has(7)).toBe(true);
+  });
+
+  it('a close_window answer without the closed ids marks the browser unsafe', async () => {
+    browser.noWindowEcho = true;
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
+    await call('s2', 'browser_new_tab', { url: 'https://bank.example/' });
+
+    await reaper.sessionClosed('s1');
+    expect(browser.windowCloses()).toHaveLength(1);
+    expect(reaper.tracked().map((t) => t.tabId)).toContain(100); // not trusted: stays tracked
+
+    await reaper.sessionClosed('s2');
+    expect(browser.windowCloses()).toHaveLength(1);
+    expect(browser.closes()).toEqual([]);
+  });
+
+  it('a browser that does not announce closeWindow is closed tab by tab, as before', async () => {
+    browser.noCloseWindow = true;
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
+    await reaper.sessionClosed('s1');
+    expect(browser.windowCloses()).toEqual([]);
+    expect(browser.closes()).toEqual([100]);
+  });
+
+  it('with the idle time at 0 the reaper still tracks owners and closes nothing', async () => {
+    const off = createTabReaper({
+      idleMs: 0,
+      now: () => clock,
+      send: (_id, type, payload) => browser.send(type, payload),
+      listConnections: () => [browser.connection()],
+    });
+    const raw: Context = { send: (t, p) => browser.send(t, p), isConnected: () => true, listConnections: () => [browser.connection()] };
+    await off.track(raw, 's1', 'x86').send('browser_new_tab', { url: 'https://shop.example/' });
+    expect(off.ownerOf('x86', 100)).toEqual({ sessionId: 's1', sessionClosed: false });
+    await off.sessionClosed('s1');
+    clock = 10 * HOUR;
+    expect(await off.sweep()).toBe(0);
+    expect(browser.closes()).toEqual([]);
+    expect(browser.windowCloses()).toEqual([]);
+  });
+
+  it('always sends tabIds with browser_close_window: the tracked tabs of that window, never empty', async () => {
+    const first = await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
+    const w1 = (first.result as { windowId: number }).windowId;
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/two', windowId: w1 });
+    await call('s2', 'browser_new_tab', { url: 'https://bank.example/' });
+    await reaper.sessionClosed('s1');
+    clock = HOUR; // s2 goes by idle
+    await reaper.sweep();
+
+    const closes = browser.sent.filter((m) => m.type === 'browser_close_window');
+    expect(closes).toHaveLength(2);
+    for (const m of closes) {
+      expect(Array.isArray(m.payload.tabIds)).toBe(true);
+      expect((m.payload.tabIds as number[]).length).toBeGreaterThan(0);
+      expect(typeof m.payload.windowId).toBe('number');
+    }
+    expect(closes.map((m) => m.payload.tabIds)).toEqual([[100, 101], [102]]);
+  });
+
+  it('reconciles a partial close echo against fresh tabs without disabling cleanup', async () => {
+    const first = await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
+    const windowId = (first.result as { windowId: number }).windowId;
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/two', windowId });
+
+    browser.echoOnly = [100]; // the extension closed only one of the two
+    await reaper.sessionClosed('s1');
+    expect(reaper.tracked()).toEqual([]); // fake browser removed both; fresh listing confirms absence
+    browser.echoOnly = null;
+    await call('s2', 'browser_new_tab', { url: 'https://later.example/' });
+    await reaper.sessionClosed('s2');
+    expect(browser.windowCloses()).toHaveLength(2);
+  });
+
+  it('an echo naming an unrequested tab fails closed', async () => {
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
+    browser.echoOnly = [100, 999];
+    await reaper.sessionClosed('s1');
+    expect(reaper.tracked()).toHaveLength(1);
+    await call('s2', 'browser_new_tab', { url: 'https://later.example/' });
+    await reaper.sessionClosed('s2');
+    expect(browser.windowCloses()).toHaveLength(1);
+  });
+
+  it('a window holding a tab dropped on a reconnection is not closed whole: only the due tab goes', async () => {
+    const first = await call('s1', 'browser_new_tab', { url: 'https://shop.example/' });
+    const windowId = (first.result as { windowId: number }).windowId;
+    await call('s1', 'browser_new_tab', { url: 'https://shop.example/two', windowId }); // 101
+    browser.connectedAt = 2000; // the browser reconnected
+    browser.tabs.set(101, 'https://other.example/'); // and 101 now shows another page: maybe not ours
+
+    await reaper.sessionClosed('s1');
+
+    expect(browser.windowCloses()).toEqual([]);
+    expect(browser.closes()).toEqual([100]);
+    expect(browser.tabs.has(101)).toBe(true);
   });
 });
