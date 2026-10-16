@@ -75,7 +75,7 @@ describe('compiled product entrypoints', () => {
       expect(replies.find((r) => r.id === 1)?.result.serverInfo.name, stderr).toBe('agent-jake-browser-mcp');
       expect(replies.find((r) => r.id === 2)?.result.tools.map((t: { name: string }) => t.name), stderr)
         .toContain('browser_list_connections');
-      expect(replies.find((r) => r.id === 2)?.result.tools, stderr).toHaveLength(39);
+      expect(replies.find((r) => r.id === 2)?.result.tools, stderr).toHaveLength(40);
       expect(replies.find((r) => r.id === 2)?.result.tools.map((t: { name: string }) => t.name), stderr)
         .not.toContain('browser_fill_secret');
     } finally {

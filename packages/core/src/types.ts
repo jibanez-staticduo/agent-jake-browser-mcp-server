@@ -34,6 +34,7 @@ export type ToolName =
   | 'browser_switch_tab'
   | 'browser_send_to_back'
   | 'browser_close_tab'
+  | 'browser_close_window'
   // Element queries
   | 'browser_get_text'
   | 'browser_get_attribute'
@@ -130,6 +131,8 @@ export interface ToolSchema {
  * most recently used connection.
  */
 export interface Context {
+  /** Server-only ownership transfer, serialized with browser commands and cleanup. */
+  claimTab?(tabId: number): Promise<{ ok: boolean; message?: string }>;
   send(
     type: ToolName,
     payload?: Record<string, unknown>,

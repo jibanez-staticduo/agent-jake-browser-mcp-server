@@ -32,6 +32,7 @@ interface TrackedTab {
   lastUsed: number;
   keepUntil: number;
   url: string;
+  windowId?: number;
   /** connectedAt of the browser connection when `url` was last observed. */
   connectedAt: number;
   connectionEpoch: string | number;
@@ -41,6 +42,7 @@ interface TrackedTab {
 interface ListedTab {
   id: number;
   url: string;
+  windowId?: number;
 }
 
 export interface TabReaperOptions {
@@ -49,6 +51,8 @@ export interface TabReaperOptions {
   send(connectionId: string, type: ToolName, payload?: Record<string, unknown>): Promise<ExtensionResponse>;
   listConnections(): BrowserConnectionInfo[];
   now?: () => number;
+  /** Serialize the whole listing/revalidation/close transaction with session commands and claims. */
+  exclusive?<T>(connectionId: string, run: () => Promise<T>): Promise<T>;
 }
 
 export interface TabReaper {
@@ -70,6 +74,8 @@ export interface TabReaper {
   /** Close every tab that is due. Returns how many it closed. */
   sweep(): Promise<number>;
   tracked(): ReadonlyArray<Readonly<TrackedTab>>;
+  ownerOf(connectionId: string, tabId: number): { sessionId: string; sessionClosed: boolean } | undefined;
+  claim(connectionId: string, tabId: number, sessionId: string): boolean;
 }
 
 const key = (connectionId: string, tabId: number) => `${connectionId}:${tabId}`;
@@ -139,7 +145,7 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
     }
   }
 
-  function adopt(sessionId: string, connectionId: string, tabId: number, url: string) {
+  function adopt(sessionId: string, connectionId: string, tabId: number, url: string, windowId?: number) {
     if (tabs.has(key(connectionId, tabId))) return;
     tabs.set(key(connectionId, tabId), {
       connectionId,
@@ -149,6 +155,7 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
       lastUsed: now(),
       keepUntil: 0,
       url,
+      windowId,
       connectedAt: connectedAtOf(connectionId),
       connectionEpoch: epochOf(connectionId)!,
       sessionClosed: closedSessions.has(sessionId),
@@ -169,17 +176,17 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
 
     if (type === 'browser_new_tab') {
       // The extension answers { tab: { id, url, connected } }; older builds answered { tabId }.
-      const tab = (result.tab ?? {}) as { id?: number; url?: string; connected?: boolean };
+      const tab = (result.tab ?? {}) as { id?: number; url?: string; connected?: boolean; windowId?: number };
       const tabId = tab.id ?? (result.tabId as number | undefined);
       if (typeof tabId !== 'number') return;
-      adopt(sessionId, connectionId, tabId, tab.url || String(payload.url ?? ''));
+      adopt(sessionId, connectionId, tabId, tab.url || String(payload.url ?? ''), tab.windowId ?? (result.windowId as number | undefined));
       if (tab.connected !== false) currentTab.set(connectionId, tabId);
       if (keepOpenMinutes !== undefined) keep(connectionId, tabId, keepOpenMinutes);
       return;
     }
 
-    const opened = result.newTabOpened as { id?: number; url?: string } | undefined;
-    if (typeof opened?.id === 'number') adopt(sessionId, connectionId, opened.id, opened.url ?? '');
+    const opened = result.newTabOpened as { id?: number; url?: string; windowId?: number } | undefined;
+    if (typeof opened?.id === 'number') adopt(sessionId, connectionId, opened.id, opened.url ?? '', opened.windowId);
 
     if (type === 'browser_switch_tab' && typeof payload.tabId === 'number') {
       currentTab.set(connectionId, payload.tabId);
@@ -218,7 +225,7 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
         }
         inFlight.set(connectionId, (inFlight.get(connectionId) ?? 0) + 1);
         activeSessions.set(sessionId, (activeSessions.get(sessionId) ?? 0) + 1);
-        const named = typeof payload.tabId === 'number' ? payload.tabId : undefined;
+        const named = typeof payload.tabId === 'number' ? payload.tabId : typeof payload.targetTabId === 'number' ? payload.targetTabId : undefined;
         touch(connectionId, named ?? (TAB_MANAGEMENT.has(type) ? undefined : currentTab.get(connectionId)), sessionId);
         try {
           const response = await context.send(type, payload, ...rest);
@@ -257,7 +264,7 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
   }
 
   const isDue = (tab: TrackedTab, t: number) =>
-    t >= tab.keepUntil && (tab.participants.size === 0 || t - tab.lastUsed >= options.idleMs);
+    options.idleMs > 0 && t >= tab.keepUntil && (tab.participants.size === 0 || t - tab.lastUsed >= options.idleMs);
 
   async function closeTab(tab: TrackedTab): Promise<boolean> {
     const answer = await options.send(tab.connectionId, 'browser_close_tab', { tabId: tab.tabId }).catch(
@@ -282,6 +289,55 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
     return true;
   }
 
+  function forget(tab: TrackedTab) {
+    if (tabs.get(key(tab.connectionId, tab.tabId)) !== tab) return;
+    tabs.delete(key(tab.connectionId, tab.tabId));
+    if (currentTab.get(tab.connectionId) === tab.tabId) currentTab.delete(tab.connectionId);
+  }
+
+  const eligible = (tab: TrackedTab) =>
+    tabs.get(key(tab.connectionId, tab.tabId)) === tab && !inFlight.has(tab.connectionId) &&
+    ![...tab.participants].some((sessionId) => activeSessions.has(sessionId)) &&
+    !activeSessions.has(tab.sessionId) && isDue(tab, now());
+
+  async function closeWindow(connection: BrowserConnectionInfo, windowId: number, group: TrackedTab[]): Promise<number> {
+    const ids = group.map((tab) => tab.tabId);
+    const answer = await options.send(connection.connectionId, 'browser_close_window', { windowId, tabIds: ids });
+    if (!answer.success) return -1; // The per-tab fallback can handle an unsupported/forgotten window.
+    const result = answer.result as { windowId?: unknown; closedTabIds?: unknown } | undefined;
+    const echoed = result?.closedTabIds;
+    if (result?.windowId !== windowId || !Array.isArray(echoed) ||
+        echoed.some((id) => !ids.includes(id)) || new Set(echoed).size !== echoed.length) {
+      unsafe.add(connection.connectionId);
+      logger.error(`[tab-reaper] invalid window-close acknowledgement on ${connection.connectionId}; no more cleanup`);
+      return 0;
+    }
+    if (epochOf(connection.connectionId) !== (connection.connectionEpoch ?? connection.connectedAt)) {
+      invalidate(connection.connectionId);
+      return 0;
+    }
+    let closed = 0;
+    for (const tab of group) if (echoed.includes(tab.tabId)) { forget(tab); closed++; }
+    if (closed < group.length) {
+      // Chrome may lose or move a tab between listing and removal. Absence is not a wrong-target echo.
+      const listing = await options.send(connection.connectionId, 'browser_list_tabs');
+      if (epochOf(connection.connectionId) !== (connection.connectionEpoch ?? connection.connectedAt)) {
+        invalidate(connection.connectionId);
+        return closed;
+      }
+      if (listing.success) {
+        const live = new Map(listedTabs(listing).map((tab) => [tab.id, tab]));
+        for (const tab of group) {
+          if (echoed.includes(tab.tabId)) continue;
+          const current = live.get(tab.tabId);
+          if (!current) forget(tab);
+          else { tab.url = current.url; tab.windowId = current.windowId; }
+        }
+      }
+    }
+    return closed;
+  }
+
   async function sweepConnection(connection: BrowserConnectionInfo, mine: TrackedTab[]): Promise<number> {
     const epoch = connection.connectionEpoch ?? connection.connectedAt;
     if (mine.some((tab) => tab.connectionEpoch !== epoch)) {
@@ -291,58 +347,65 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
     if (!mine.length || inFlight.has(connection.connectionId)) return 0;
     const listing = await options.send(connection.connectionId, 'browser_list_tabs');
     if (!listing.success) return 0;
-    if (epochOf(connection.connectionId) !== epoch) {
-      invalidate(connection.connectionId);
-      return 0;
-    }
-    const open = new Map(listedTabs(listing).map((tab) => [tab.id, tab.url ?? '']));
-    const announced = closesById(listing);
-    let closed = 0;
-
+    if (epochOf(connection.connectionId) !== epoch) { invalidate(connection.connectionId); return 0; }
+    const listed = listedTabs(listing);
+    const open = new Map(listed.map((tab) => [tab.id, tab]));
+    const due: TrackedTab[] = [];
     for (const tab of mine) {
       if (tabs.get(key(tab.connectionId, tab.tabId)) !== tab) continue;
-      if (epochOf(connection.connectionId) !== epoch) {
-        invalidate(connection.connectionId);
-        break;
+      const live = open.get(tab.tabId);
+      if (!live) { forget(tab); continue; }
+      tab.windowId = live.windowId;
+      if (eligible(tab)) due.push(tab);
+      else { tab.url = live.url; tab.connectedAt = connection.connectedAt; }
+    }
+    if (!closesById(listing) || unsafe.has(connection.connectionId)) return 0;
+    let closed = 0;
+    const done = new Set<TrackedTab>();
+    const capabilities = listing.result as { closeWindow?: unknown };
+    const groups = new Map<number, TrackedTab[]>();
+    if (capabilities.closeWindow === true) {
+      for (const tab of due) if (typeof tab.windowId === 'number') {
+        groups.set(tab.windowId, [...(groups.get(tab.windowId) ?? []), tab]);
       }
-      const url = open.get(tab.tabId);
-      const forget = () => {
-        tabs.delete(key(tab.connectionId, tab.tabId));
-        if (currentTab.get(tab.connectionId) === tab.tabId) currentTab.delete(tab.connectionId);
-      };
-      if (url === undefined) {
-        forget(); // already gone
-      } else if (!inFlight.has(connection.connectionId) &&
-        ![...tab.participants].some((sessionId) => activeSessions.has(sessionId)) &&
-        !activeSessions.has(tab.sessionId) && isDue(tab, now())) {
-        // Stays tracked: it closes once the browser runs a build that can.
-        if (!announced || unsafe.has(tab.connectionId)) continue;
-        // Keep the guard until ownership is forgotten, including the close acknowledgement.
-        closing.add(connection.connectionId);
-        try {
-          if (await closeTab(tab)) {
-            closed++;
-            if (tabs.get(key(tab.connectionId, tab.tabId)) === tab) forget();
-          }
-        } finally {
-          closing.delete(connection.connectionId);
+    }
+    for (const [windowId, group] of groups) {
+      const ids = new Set(group.map((tab) => tab.tabId));
+      if (listed.some((tab) => tab.windowId === windowId && !ids.has(tab.id))) continue;
+      if (unsafe.has(connection.connectionId)) break;
+      if (epochOf(connection.connectionId) !== epoch) { invalidate(connection.connectionId); return closed; }
+      // Ownership/use is checked inside the connection transaction, immediately before close.
+      if (!group.every(eligible)) continue;
+      closing.add(connection.connectionId);
+      try {
+        const count = await closeWindow(connection, windowId, group);
+        if (count >= 0) {
+          closed += count;
+          for (const tab of group) done.add(tab);
         }
-      } else {
-        tab.url = url;
-        tab.connectedAt = connection.connectedAt;
-      }
+      } finally { closing.delete(connection.connectionId); }
+    }
+    for (const tab of due) {
+      if (done.has(tab) || unsafe.has(connection.connectionId) || !eligible(tab)) continue;
+      if (epochOf(connection.connectionId) !== epoch) { invalidate(connection.connectionId); break; }
+      closing.add(connection.connectionId);
+      try {
+        if (await closeTab(tab)) { closed++; forget(tab); }
+      } finally { closing.delete(connection.connectionId); }
     }
     return closed;
   }
 
   async function runSweep(): Promise<number> {
+    if (options.idleMs <= 0) return 0;
     let closed = 0;
     for (const connection of options.listConnections()) {
       if (connection.open === false) continue;
       const mine = [...tabs.values()].filter((tab) => tab.connectionId === connection.connectionId);
       if (!mine.length) continue;
       try {
-        closed += await sweepConnection(connection, mine);
+        const run = () => sweepConnection(connection, mine);
+        closed += await (options.exclusive ? options.exclusive(connection.connectionId, run) : run());
       } catch (error) {
         logger.warn(`[tab-reaper] sweep of ${connection.connectionId} failed: ${(error as Error).message}`);
       }
@@ -374,7 +437,28 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
         any = true;
       }
     }
-    if (any) await sweep();
+    if (any) {
+      const pending = sweeping;
+      await sweep();
+      // A running sweep may have snapshotted connections/tabs before this session ended.
+      if (pending) await sweep();
+    }
+  }
+
+  function ownerOf(connectionId: string, tabId: number) {
+    const tab = tabs.get(key(connectionId, tabId));
+    if (!tab || tab.connectionEpoch !== epochOf(connectionId)) return undefined;
+    return { sessionId: tab.sessionId, sessionClosed: tab.sessionClosed };
+  }
+
+  function claim(connectionId: string, tabId: number, sessionId: string): boolean {
+    const tab = tabs.get(key(connectionId, tabId));
+    if (!tab || closing.has(connectionId) || closedSessions.has(sessionId) || tab.connectionEpoch !== epochOf(connectionId)) return false;
+    tab.sessionId = sessionId;
+    tab.sessionClosed = false;
+    tab.participants = new Set([sessionId]);
+    tab.lastUsed = now();
+    return true;
   }
 
   return {
@@ -384,6 +468,8 @@ export function createTabReaper(options: TabReaperOptions): TabReaper {
     sessionClosed,
     sweep,
     tracked: () => [...tabs.values()],
+    ownerOf,
+    claim,
   };
 }
 
