@@ -10,6 +10,7 @@ import { tabTools } from './tabs.js';
 import { queryTools } from './queries.js';
 import { connectionsTools } from './connections.js';
 import type { Tool } from '../types.js';
+import { isSaveSecretConfigured } from '../onepassword-connect.js';
 
 /**
  * Get all available tools.
@@ -24,7 +25,7 @@ export function getAllTools(): Tool[] {
     ...tabTools,
     ...queryTools,
     ...connectionsTools,
-  ];
+  ].filter((tool) => tool.schema.name !== 'browser_save_secret' || isSaveSecretConfigured());
 }
 
 // Re-export individual tool sets
