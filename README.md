@@ -270,6 +270,17 @@ saving, it does not hide it.
 |------|-------------|
 | `browser_list_connections` | List the browsers attached to this server, answered without a browser |
 
+### Plugins (2 tools, advertised only when configured)
+
+Tools answered by another service through this server, so they take no `connection` and no `tabId`.
+They appear in `tools/list` only when `PASEO_MCP_URL` and `PASEO_MCP_TOKEN` are set: advertising a
+tool that cannot work is worse than not having it.
+
+| Tool | Description |
+|------|-------------|
+| `delegar` | Launch an agent outside the browser (Claude CLI on paseo) and return once it is running |
+| `delegar_estado` | Status of the agent that `delegar` returned |
+
 ## Example Usage
 
 Once connected, the AI agent can use these tools:
