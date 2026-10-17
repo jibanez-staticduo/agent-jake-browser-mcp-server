@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Copia versionada en este fork del subset de aserciones de
+# ~/mcp-servers/agent-browser/scripts/check-deltas.sh que le toca al server
+# (deltas 1, 1b, 7b y 8). Ruling CTO DGX-309: el script compartido NO se mueve ni
+# se cambia (lo usa el timer systemd de producción); esta copia está adaptada
+# a un checkout de un solo repo, con rutas relativas a la raíz del repo.
+# Un auto-update que revierta cualquiera de estos es un FALLO, no un exito.
+set -u
+cd "$(dirname "$0")/.."
+fail=0
+chk() { # chk <descripcion> <comando grep...>
+  local desc="$1"; shift
+  if "$@" >/dev/null 2>&1; then echo "  ok    $desc"; else echo "  FALLO $desc"; fail=1; fi
+}
+chk "1 WS server no escucha fijo en 0.0.0.0"        bash -c "! grep -q \"host: '0.0.0.0'\" src/ws-server.ts"
+chk "1b WS server verifica token en handshake"      grep -q verifyClient src/ws-server.ts
+chk "7b browser_state registrado en el server"      grep -q stateTools src/tools/index.ts
+chk "8 pestañas del agente se cierran (tab-reaper)"   grep -q tabReaper src/http-server.ts
+chk "type conserva el aviso del campo de la extension; fill_secret exige verificacion" grep -q "fieldWarning(response.result)" src/tools/interaction.ts
+chk "cada sesión trabaja en su pestaña (session-tabs)" bash -c 'grep -q "sessionTabs.route(" src/http-server.ts && grep -q "targetTabId" src/session-tabs.ts'
+chk "versión publicada de la extensión en /download/latest.json" bash -c 'grep -q "/download/latest.json" src/http-server.ts && test -f src/published-extension.ts'
+chk "SC-2102 saveSecretTool está en interactionTools" bash -c "sed -n '/^export const interactionTools/,/^];/p' src/tools/interaction.ts | grep -q saveSecretTool"
+chk "SC-2102 onepassword-connect.ts existe y no tiene DELETE, child_process ni node:fs" bash -c '[ -f src/onepassword-connect.ts ] && ! grep -Eq "DELETE|child_process|node:fs" src/onepassword-connect.ts'
+chk "SC-2577 plugins del servidor entran por el registro" bash -c 'test -f src/tools/plugins.ts && grep -q getPluginTools src/tools/index.ts'
+chk "SC-2577 un plugin no anuncia connection ni tabId" grep -q "tool.external ? tool.schema" src/http-server.ts
+exit $fail

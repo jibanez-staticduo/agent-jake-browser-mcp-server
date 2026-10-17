@@ -1,11 +1,3 @@
-FROM alpine:3.22 AS opcli
-
-ARG OP_VERSION=2.39.0
-ARG TARGETARCH
-COPY scripts/install-op.sh /install-op.sh
-RUN apk add --no-cache curl unzip \
- && sh /install-op.sh "$OP_VERSION" "$TARGETARCH" /out
-
 FROM node:22-alpine AS builder
 
 ENV TZ=Europe/Madrid
@@ -13,11 +5,20 @@ ENV TZ=Europe/Madrid
 WORKDIR /app
 
 COPY package*.json ./
-COPY packages ./packages
 RUN npm ci
 
 COPY . .
-RUN npm run build
+# a+rX: the runtime user is non-root, and a checkout made with a strict umask
+# (files 0600) would otherwise crash it with EACCES on the first import.
+RUN npm run build && chmod -R a+rX /app
+
+# 1Password CLI for browser_fill_secret (reads op:// with OP_SERVICE_ACCOUNT_TOKEN).
+FROM alpine:3.22 AS opcli
+ARG OP_VERSION=2.39.0
+ARG TARGETARCH
+COPY scripts/install-op.sh /install-op.sh
+RUN apk add --no-cache curl unzip \
+ && sh /install-op.sh "$OP_VERSION" "$TARGETARCH" /usr/local/bin
 
 FROM node:22-alpine
 
@@ -27,14 +28,11 @@ ENV TZ=Europe/Madrid \
 WORKDIR /app
 
 RUN apk add --no-cache tini
-
-COPY --from=opcli /out/op /usr/local/bin/op
+COPY --from=opcli /usr/local/bin/op /usr/local/bin/op
 
 COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/entrypoints ./entrypoints
 COPY --from=builder /app/http-server.js ./http-server.js
-COPY --from=builder /app/packages ./packages
 COPY --from=builder /app/healthcheck.js ./healthcheck.js
 COPY --from=builder /app/docker-entrypoint.sh ./docker-entrypoint.sh
 
@@ -51,4 +49,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD ["node", "/app/healthcheck.js"]
 
 ENTRYPOINT ["/sbin/tini", "--", "/app/docker-entrypoint.sh"]
+
 CMD ["node", "dist/http-server.js"]

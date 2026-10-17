@@ -1,2 +1,2 @@
-// Compatibility for existing infrastructure invoking this file with node/tsx.
+// Compatibility entrypoint for existing service commands.
 import './dist/http-server.js';

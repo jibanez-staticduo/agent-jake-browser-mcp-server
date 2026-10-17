@@ -1,0 +1,687 @@
+// @ts-nocheck
+import express from 'express';
+import { randomUUID } from 'node:crypto';
+import { createReadStream, readFileSync } from 'node:fs';
+import { stat } from 'node:fs/promises';
+import path from 'node:path';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { CallToolRequestSchema, ListToolsRequestSchema, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { createContext } from './context.js';
+import { getAllTools } from './tools/index.js';
+import { getSharedTokenStore } from './token-store.js';
+import { createPairingStore } from './pairing-store.js';
+import { patchZipConfig } from './extension-zip.js';
+import { extensionZipPath, readPublishedVersion } from './published-extension.js';
+import { parseLabels, nameOf, resolveTarget, findConnection } from './connection-target.js';
+import { createTabReaper, idleMinutesFromEnv } from './tab-reaper.js';
+import { createSessionTabs, acceptsExplicitTab } from './session-tabs.js';
+
+const PORT = Number(process.env.MCP_HTTP_PORT || 8000);
+const WS_PORT = Number(process.env.BROWSER_WS_PORT || 8765);
+const HTTP_HOST = process.env.MCP_HTTP_HOST || '127.0.0.1';
+// What the extension CI published here (src/published-extension.ts): latest.json and its zip.
+const EXTENSION_DIR = process.env.BROWSER_EXTENSION_DIR || '/data/extension';
+const WS_PATH = process.env.BROWSER_WS_PATH || '/';
+
+const TAB_FIELD = {
+  type: 'integer',
+  description:
+    'Tab to run this command in (see browser_list_tabs). Without it: this session\'s own tab. A tab another session opened answers TAB_OWNED; take it over with browser_claim_tab.',
+};
+
+const CONNECTION_FIELD = {
+  type: 'string',
+  description:
+    'Browser to drive: a connection id or its name (e.g. "mac", "x86"). Once given, it sticks for the rest of this MCP session. Without it: this session\'s choice, else the configured default. See browser_list_connections.',
+};
+
+// Browser choice per MCP session (see src/connection-target.ts). Names: connectionId -> name.
+const CONNECTION_LABELS = parseLabels(process.env.AGENT_BROWSER_CONNECTION_LABELS);
+const DEFAULT_CONNECTION = (process.env.AGENT_BROWSER_DEFAULT_CONNECTION || '').trim() || undefined;
+const sessionDefaults = new Map();
+
+function openConnections() {
+  return context.listConnections().filter((c) => c.open !== false);
+}
+
+const app = express();
+app.use(express.json());
+
+const transports = new Map();
+const servers = new Map();
+const context = createContext({ port: WS_PORT });
+const tokenStore = getSharedTokenStore();
+const allTools = getAllTools();
+const toolMap = new Map(allTools.map((tool) => [tool.schema.name, tool]));
+
+// Each MCP session works in its own tab, even with several on one browser (src/session-tabs.ts).
+// Who owns each tab is the tab reaper's registry (below); session-tabs only asks it.
+const sessionTabs = createSessionTabs({
+  ownerOf: (connectionId, tabId) => tabReaper.ownerOf(connectionId, tabId),
+  claim: (connectionId, tabId, sessionId) => tabReaper.claim(connectionId, tabId, sessionId),
+});
+
+// Agent tabs close when their MCP session ends or after this long without use (src/tab-reaper.ts).
+// The reaper always exists: its registry is what says whose a tab is. AGENT_BROWSER_TAB_IDLE_MINUTES=0
+// only turns the closing (and the sweep timer) off.
+const TAB_IDLE_MINUTES = idleMinutesFromEnv();
+const tabReaper = createTabReaper({
+  idleMs: TAB_IDLE_MINUTES * 60_000,
+  // Reserve the queue once for listing, revalidation and closing (never nest queued sends).
+  exclusive: (connectionId, run) => sessionTabs.exclusive(connectionId, run),
+  send: async (connectionId, type, payload) => {
+    const response = await context.forConnection(connectionId).send(type, payload);
+    sessionTabs.observeSystem(connectionId, type, response);
+    return response;
+  },
+  listConnections: () => context.listConnections(),
+});
+if (TAB_IDLE_MINUTES > 0) {
+  setInterval(() => void tabReaper.sweep(), 5 * 60_000).unref();
+}
+
+const pairing = createPairingStore({
+  issueToken: (record) =>
+    tokenStore.issueToken({
+      label: record.label || 'pairing',
+      ...(record.connectionId ? { connectionId: record.connectionId } : {}),
+    }),
+});
+
+/**
+ * Advertise the optional `connection` argument on every tool without touching the
+ * ~30 zod schemas: the annotation happens here, and the field is stripped before
+ * the tool runs so zod never sees it.
+ */
+function annotateToolSchema(tool) {
+  const annotated = structuredClone(tool);
+  if (!annotated.inputSchema || typeof annotated.inputSchema !== 'object') {
+    annotated.inputSchema = { type: 'object', properties: {} };
+  }
+  if (!annotated.inputSchema.properties || typeof annotated.inputSchema.properties !== 'object') {
+    annotated.inputSchema.properties = {};
+  }
+  annotated.inputSchema.properties.connection ??= { ...CONNECTION_FIELD };
+  if (acceptsExplicitTab(annotated.name)) annotated.inputSchema.properties.tabId ??= { ...TAB_FIELD };
+  return annotated;
+}
+
+function toolsListPayload() {
+  // A plugin goes to no browser: advertising `connection` on it would invite the caller to aim it at one.
+  return allTools.map((tool) => (tool.external ? tool.schema : annotateToolSchema(tool.schema)));
+}
+
+function textContent(text, isError) {
+  const result = { content: [{ type: 'text', text }] };
+  if (isError) result.isError = true;
+  return result;
+}
+
+/**
+ * Resolve the target browser, run the tool against that connection and keep
+ * `connection` out of the arguments sent to the extension.
+ */
+async function callTool(name, rawArgs, sessionId) {
+  const tool = toolMap.get(name);
+  if (!tool) return textContent(`Unknown tool: ${name}`, true);
+  tabReaper.touchSession(sessionId);
+
+  const args = { ...(rawArgs ?? {}) };
+  const requested =
+    typeof args.connection === 'string' && args.connection.trim() ? args.connection.trim() : undefined;
+  delete args.connection;
+  // An explicit tab is handled here for every command that has no `tabId` of its own, so the
+  // tools' zod schemas never see it (src/session-tabs.ts checks who owns it).
+  let explicitTabId;
+  if (acceptsExplicitTab(name) && args.tabId !== undefined) {
+    if (!Number.isInteger(args.tabId)) return textContent('tabId must be an integer', true);
+    explicitTabId = args.tabId;
+    delete args.tabId;
+  }
+
+  if (name === 'browser_list_connections') {
+    const mine = sessionId ? sessionDefaults.get(sessionId) : undefined;
+    const rows = context.listConnections().map((c) => ({
+      name: nameOf(c, CONNECTION_LABELS) || null,
+      connectionId: c.connectionId,
+      label: c.label,
+      clientIp: c.clientIp,
+      peerIp: c.peerIp,
+      clientIpSource: c.clientIpSource,
+      open: c.open,
+      userAgent: c.userAgent,
+      secondsSinceLastActivity: c.secondsSinceLastActivity,
+      thisSession: c.connectionId === mine,
+      configuredDefault: !!DEFAULT_CONNECTION &&
+        [c.connectionId, nameOf(c, CONNECTION_LABELS)].some((v) => v && v.toLowerCase() === DEFAULT_CONNECTION.toLowerCase()),
+    }));
+    return textContent(JSON.stringify(rows, null, 2));
+  }
+
+  if (tool.serverSide) {
+    return tool.handle(context, args);
+  }
+
+  if (!requested && !openConnections().length) {
+    try {
+      await context.waitForConnection(10000);
+    } catch {
+      return textContent(
+        'Extension not connected. Please ensure the Chrome extension is running and connected.',
+        true,
+      );
+    }
+  }
+
+  const target = resolveTarget({
+    requested,
+    sessionDefault: sessionId ? sessionDefaults.get(sessionId) : undefined,
+    configuredDefault: DEFAULT_CONNECTION,
+    open: openConnections(),
+    labels: CONNECTION_LABELS,
+  });
+  if (!target.ok) return textContent(target.error, true);
+  if (target.sticky && sessionId) sessionDefaults.set(sessionId, target.connectionId);
+
+  const keepOpenMinutes = typeof args.keepOpenMinutes === 'number' ? args.keepOpenMinutes : undefined;
+  // The reaper sits under the router: it sees what is sent to the browser (never a refused command).
+  const tracked = tabReaper.track(context.forConnection(target.connectionId), sessionId, target.connectionId, keepOpenMinutes);
+  return tool.handle(sessionTabs.route(tracked, sessionId, target.connectionId, { explicitTabId }), args);
+}
+
+function createMcpServer() {
+  const server = new Server(
+    { name: 'agent-jake-browser-mcp', version: '1.0.0' },
+    { capabilities: { tools: {} } },
+  );
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: toolsListPayload(),
+  }));
+
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) =>
+    callTool(request.params.name, request.params.arguments, extra?.sessionId),
+  );
+
+  return server;
+}
+
+function listToolsResult() {
+  return { jsonrpc: '2.0', id: null, result: { tools: toolsListPayload() } };
+}
+
+/**
+ * The extension polls pairing from a chrome-extension origin. The approval page
+ * is same-origin and must not expose its token response to arbitrary websites.
+ */
+function cors(req, res, next) {
+  const origin = req.headers.origin || '';
+  if (!/^chrome-extension:\/\/[a-p]{32}$/.test(origin)) {
+    if (req.method === 'OPTIONS') return res.sendStatus(403);
+    return next();
+  }
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'content-type');
+  res.setHeader('Access-Control-Max-Age', '600');
+  if (req.method === 'OPTIONS') {
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
+  next();
+}
+
+app.use((req, res, next) => {
+  if (req.path === '/pair/start' || req.path === '/pair/status') {
+    return cors(req, res, next);
+  }
+  return next();
+});
+
+/**
+ * ws(s) URL handed to the extension: behind a reverse proxy the forwarded
+ * headers are authoritative, and BROWSER_PUBLIC_WS_URL wins over both.
+ */
+function publicWsUrl(req) {
+  if (process.env.BROWSER_PUBLIC_WS_URL) return process.env.BROWSER_PUBLIC_WS_URL;
+
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '')
+    .split(',')
+    .map((part) => part.trim())
+    .find(Boolean);
+  const forwardedHost = String(req.headers['x-forwarded-host'] || '').trim();
+  const proto = forwardedProto || req.protocol || 'http';
+  const isSecured = proto === 'https' || proto === 'wss';
+
+  // Behind a reverse proxy the public host and the WS path are the proxy's
+  // business: the extension must use the address the proxy advertises.
+  if (forwardedProto || forwardedHost) {
+    const host = forwardedHost || String(req.headers.host || 'localhost');
+    return `${isSecured ? 'wss' : 'ws'}://${host}${WS_PATH}`;
+  }
+
+  // Direct access: the extension reaches the WebSocket on its own port, which is
+  // not the HTTP port that served this response.
+  const hostname = String(req.headers.host || '127.0.0.1').split(':')[0] || '127.0.0.1';
+  return `${isSecured ? 'wss' : 'ws'}://${hostname}:${WS_PORT}${WS_PATH}`;
+}
+
+app.get('/healthz', (_req, res) => {
+  res.status(200).send('ok');
+});
+
+app.get('/connections', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    authEnabled:
+      (process.env.BROWSER_WS_TOKEN || '') !== '' || process.env.BROWSER_ALLOW_PAIRING === 'true',
+    wsUrl: publicWsUrl(req),
+    connections: context.listConnections(),
+  });
+});
+
+/**
+ * The patched archive is derived from the template plus BROWSER_PUBLIC_WS_URL, so
+ * one cache slot is enough; the key changes when the mounted template is replaced.
+ */
+let patchedZipCache = null;
+
+function patchedExtensionZip(zipPath, info, wsUrl) {
+  const key = JSON.stringify([zipPath, info.mtimeMs, info.size, wsUrl]);
+  if (patchedZipCache && patchedZipCache.key === key) return patchedZipCache.buffer;
+
+  const patched = patchZipConfig(readFileSync(zipPath), wsUrl);
+  patchedZipCache = { key, buffer: patched.buffer };
+  console.error(
+    `Agent Jake Browser: ${patched.replaced ? 'updated' : 'added'} ${patched.entryName} -> ${wsUrl} (${patched.buffer.length} bytes)`,
+  );
+  return patched.buffer;
+}
+
+// The newest published build, for the installed extensions' update check (startup + every 30 min).
+app.get('/download/latest.json', (_req, res) => {
+  const latest = readPublishedVersion(EXTENSION_DIR);
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  if (!latest) return res.status(404).json({ error: 'no extension build published on this server' });
+  return res.json({ ...latest, download: '/download/artifact.zip' });
+});
+
+// Updates consume the signed bytes; instance configuration belongs only to the initial download.
+app.get('/download/artifact.zip', async (_req, res) => {
+  const file = path.join(EXTENSION_DIR, 'agent-jake-browser-extension.zip');
+  try {
+    const info = await stat(file);
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Length', String(info.size));
+    createReadStream(file).on('error', () => res.destroy()).pipe(res);
+  } catch {
+    res.status(404).json({ error: 'no extension artifact published on this server' });
+  }
+});
+
+app.get('/download', async (_req, res) => {
+  const EXTENSION_ZIP = extensionZipPath(process.env, EXTENSION_DIR);
+  try {
+    const info = await stat(EXTENSION_ZIP);
+    const wsUrl = (process.env.BROWSER_PUBLIC_WS_URL || '').trim();
+
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${path.basename(EXTENSION_ZIP)}"`,
+    );
+
+    let patched = null;
+    if (wsUrl) {
+      try {
+        patched = patchedExtensionZip(EXTENSION_ZIP, info, wsUrl);
+      } catch (err) {
+        // A broken template must not take the download down: serve the original.
+        console.error('Agent Jake Browser: config.json injection failed, serving template as-is', err);
+        patched = null;
+      }
+    }
+
+    if (patched) {
+      res.setHeader('Content-Length', String(patched.length));
+      res.end(patched);
+      return;
+    }
+
+    res.setHeader('Content-Length', String(info.size));
+    createReadStream(EXTENSION_ZIP).pipe(res);
+  } catch {
+    res.status(404).type('text/plain; charset=utf-8').send(
+      `Extension zip not found on the server at ${EXTENSION_ZIP}.\n` +
+        'Set BROWSER_EXTENSION_ZIP to the built extension archive, or load the extension unpacked from a local checkout.\n' +
+        'Build it in agent-jake-browser-mcp-extension with: npm run build && zip -r dist/extension.zip dist',
+    );
+  }
+});
+
+app.get('/', (_req, res) => {
+  res.setHeader('Cache-Control', 'public, max-age=60');
+  res.type('html').send(INDEX_HTML);
+});
+
+app.get('/pair', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.type('html').send(PAIR_HTML);
+});
+
+app.post('/pair/start', (req, res) => {
+  const otp = typeof req.body?.otp === 'string' ? req.body.otp.trim() : '';
+  if (!/^[\w:-]{4,128}$/.test(otp)) {
+    res.status(400).json({ error: 'otp must be a 4-128 character code (letters, digits, - or _)' });
+    return;
+  }
+  const connectionId =
+    typeof req.body?.connectionId === 'string' && req.body.connectionId.trim()
+      ? req.body.connectionId.trim().slice(0, 128)
+      : undefined;
+  const label =
+    typeof req.body?.label === 'string' && req.body.label.trim()
+      ? req.body.label.trim().slice(0, 128)
+      : undefined;
+
+  const record = pairing.start(otp, { connectionId, label });
+  res.status(201).json({
+    state: 'pending',
+    otp,
+    expiresAt: new Date(record.expiresAt).toISOString(),
+    approveUrl: `${publicOrigin(req)}/pair?otp=${encodeURIComponent(otp)}`,
+  });
+});
+
+app.post('/pair/approve', (req, res) => {
+  const otp = typeof req.body?.otp === 'string' ? req.body.otp.trim() : '';
+  const result = pairing.approve(otp);
+  if (!result.ok) {
+    res.status(410).json({
+      error:
+        result.reason === 'used'
+          ? 'This pairing code was already used. Ask the extension to start a new pairing.'
+          : 'This pairing code is expired or unknown. Ask the extension to start a new pairing.',
+    });
+    return;
+  }
+  res.json({ token: result.token, wsUrl: publicWsUrl(req) });
+});
+
+app.get('/pair/status', (req, res) => {
+  const otp = typeof req.query.otp === 'string' ? req.query.otp.trim() : '';
+  const status = pairing.status(otp);
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(status);
+});
+
+function publicOrigin(req) {
+  if (process.env.BROWSER_PUBLIC_ORIGIN) return process.env.BROWSER_PUBLIC_ORIGIN.replace(/\/$/, '');
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '')
+    .split(',')[0]
+    .trim();
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || `127.0.0.1:${PORT}`);
+  return `${forwardedProto || req.protocol || 'http'}://${host}`;
+}
+
+/**
+ * Reload an extension from disk after a deploy replaced its unpacked build: no Chrome
+ * debugging port, no screen, no human. Deliberately NOT an MCP tool (agents never need it)
+ * and loopback-only: deploys reach it with `kubectl exec ... curl 127.0.0.1:8000`; the
+ * IngressRoute does not publish it and the gateway only proxies /mcp.
+ * Body: {"connection": "<id or name>"}. Answers once the browser has reconnected.
+ */
+const isLoopback = (req) => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress);
+
+app.post('/extension/reload', async (req, res) => {
+  if (!isLoopback(req)) return res.status(403).json({ ok: false, error: 'loopback only' });
+  const wanted = String(req.body?.connection || '').trim();
+  if (!wanted) return res.status(400).json({ ok: false, error: 'connection (id or name) is required' });
+  const hit = findConnection(wanted, openConnections(), CONNECTION_LABELS);
+  if (!hit) return res.status(404).json({ ok: false, error: `no open connection "${wanted}"` });
+
+  const before = Date.now();
+  try {
+    const answer = await context.forConnection(hit.connectionId).send('browser_reload_extension', {});
+    if (!answer.success) return res.status(502).json({ ok: false, error: answer.error?.message || 'reload refused' });
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: String(err?.message || err) });
+  }
+  const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 60000, 180000);
+  for (let waited = 0; waited < timeoutMs; waited += 500) {
+    await new Promise((r) => setTimeout(r, 500));
+    const back = context.listConnections().find((c) => c.connectionId === hit.connectionId && c.open !== false && c.connectedAt > before);
+    if (back) return res.json({ ok: true, connectionId: hit.connectionId, name: nameOf(back, CONNECTION_LABELS) || null, reconnectedAfterMs: back.connectedAt - before });
+  }
+  return res.status(504).json({ ok: false, error: `reload sent but ${wanted} did not reconnect within ${timeoutMs} ms` });
+});
+
+app.post('/mcp', async (req, res) => {
+  try {
+    if (!req.headers['mcp-session-id'] && req.body?.method === 'tools/list') {
+      res.json({ ...listToolsResult(), id: req.body?.id ?? null });
+      return;
+    }
+
+    const sessionId = req.headers['mcp-session-id'];
+    let transport;
+
+    if (sessionId && transports.has(sessionId)) {
+      transport = transports.get(sessionId);
+    } else if (!sessionId && isInitializeRequest(req.body)) {
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (newSessionId) => transports.set(newSessionId, transport),
+      });
+      transport.onclose = () => {
+        if (transport.sessionId) {
+          void tabReaper.sessionClosed(transport.sessionId);
+          sessionTabs.sessionClosed(transport.sessionId);
+          transports.delete(transport.sessionId);
+          servers.delete(transport.sessionId);
+          sessionDefaults.delete(transport.sessionId);
+        }
+      };
+      const server = createMcpServer();
+      await server.connect(transport);
+      transport._agentJakeServer = server;
+    } else {
+      res.status(400).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Bad Request: no valid session ID' }, id: req.body?.id ?? null });
+      return;
+    }
+
+    await transport.handleRequest(req, res, req.body);
+  } catch (error) {
+    console.error('MCP POST failed', error);
+    if (!res.headersSent) {
+      res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: req.body?.id ?? null });
+    }
+  }
+});
+
+app.get('/mcp', async (req, res) => {
+  const sessionId = req.headers['mcp-session-id'];
+  const transport = sessionId ? transports.get(sessionId) : undefined;
+  if (!transport) {
+    res.status(400).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Bad Request: no valid session ID' }, id: null });
+    return;
+  }
+  await transport.handleRequest(req, res);
+});
+
+app.delete('/mcp', async (req, res) => {
+  const sessionId = req.headers['mcp-session-id'];
+  const transport = sessionId ? transports.get(sessionId) : undefined;
+  if (!transport) {
+    res.status(400).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Bad Request: no valid session ID' }, id: req.body?.id ?? null });
+    return;
+  }
+  await transport.handleRequest(req, res, req.body);
+});
+
+const INDEX_HTML = `<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Jake Browser MCP</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 0 auto; padding: 2rem 1.25rem; max-width: 48rem; }
+  h1 { font-size: 1.3rem; margin-bottom: .25rem; }
+  .muted { opacity: .7; }
+  ul { padding-left: 1.1rem; }
+  code { font-family: ui-monospace, monospace; font-size: .9em; word-break: break-all; }
+  table { border-collapse: collapse; width: 100%; margin-top: .5rem; }
+  th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid rgba(127,127,127,.3); font-size: .9rem; }
+  .badge { border: 1px solid rgba(127,127,127,.5); border-radius: 999px; padding: .05rem .5rem; font-size: .8rem; }
+  .active { border-color: #2e7d32; }
+</style>
+</head>
+<body>
+<h1>Agent Jake Browser MCP</h1>
+<p class="muted">Servidor MCP que pilota los navegadores conectados por extensión.</p>
+<ul>
+  <li><a href="/download">Descargar la extensión</a> (zip con esta URL y token embebidos si usas el flujo de pairing)</li>
+  <li><a href="/pair">Aprobar un código de pairing</a></li>
+  <li><code>/mcp</code> — endpoint MCP (streamable HTTP)</li>
+</ul>
+<h2>Conexiones ahora mismo</h2>
+<div id="connections" class="muted">Cargando…</div>
+<script>
+async function load() {
+  const box = document.getElementById('connections');
+  try {
+    const res = await fetch('/connections', { headers: { accept: 'application/json' } });
+    const data = await res.json();
+    if (!data.connections || data.connections.length === 0) {
+      box.textContent = 'Ninguna conexión abierta. Instala la extensión y páreala con un código.';
+      return;
+    }
+    const element = (tag, text) => {
+      const node = document.createElement(tag);
+      if (text !== undefined) node.textContent = text;
+      return node;
+    };
+    const table = element('table');
+    const head = element('thead');
+    const headings = element('tr');
+    for (const title of ['connectionId', 'Equipo / navegador', 'estado', 'última actividad', '']) {
+      headings.appendChild(element('th', title));
+    }
+    head.appendChild(headings);
+    table.appendChild(head);
+    const body = element('tbody');
+    for (const c of data.connections) {
+      const row = element('tr');
+      const id = element('td');
+      id.appendChild(element('code', c.connectionId));
+      row.appendChild(id);
+      row.appendChild(element('td', c.label || (c.clientIp ? 'IP ' + c.clientIp : 'Desconocido')));
+      row.appendChild(element('td', c.open ? 'abierta' : 'cerrada'));
+      row.appendChild(element('td', Math.round(c.secondsSinceLastActivity) + 's'));
+      const active = element('td');
+      if (c.active) {
+        const badge = element('span', 'activa');
+        badge.className = 'badge active';
+        active.appendChild(badge);
+      }
+      row.appendChild(active);
+      body.appendChild(row);
+    }
+    table.appendChild(body);
+    const status = element('p', 'Auth: ' + (data.authEnabled ? 'token requerido' : 'sin token') + ' · WS: ');
+    status.className = 'muted';
+    status.appendChild(element('code', data.wsUrl));
+    box.replaceChildren(table, status);
+  } catch (err) {
+    box.textContent = 'No se pudo leer /connections: ' + err;
+  }
+}
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>`;
+
+const PAIR_HTML = `<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Parear navegador · Agent Jake Browser</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 0 auto; padding: 2rem 1.25rem; max-width: 34rem; }
+  label { display: block; margin-top: 1rem; }
+  input { width: 100%; padding: .5rem; font: inherit; }
+  button { margin-top: 1rem; padding: .6rem 1rem; font: inherit; cursor: pointer; }
+  pre { background: rgba(127,127,127,.15); padding: .75rem; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
+  .muted { opacity: .7; }
+  .error { color: #b3261e; }
+</style>
+</head>
+<body>
+<h1>Parear un navegador</h1>
+<p class="muted">Introduce el código que muestra el popup de la extensión. Al aprobarse se emite un token de un solo uso para esa instalación.</p>
+<form id="form">
+  <label for="otp">Código de pairing
+    <input id="otp" autocomplete="one-time-code" placeholder="ABC123" maxlength="128">
+  </label>
+  <button type="submit">Aprobar y emitir token</button>
+</form>
+<p id="message" class="muted"></p>
+<pre id="result" hidden></pre>
+<script>
+  const params = new URLSearchParams(location.search);
+  const otpInput = document.getElementById('otp');
+  const message = document.getElementById('message');
+  const result = document.getElementById('result');
+  if (params.get('otp')) otpInput.value = params.get('otp');
+
+  document.getElementById('form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const otp = otpInput.value.trim();
+    message.className = 'muted';
+    message.textContent = 'Aprobando…';
+    try {
+      const res = await fetch('/pair/approve', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ otp }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        message.className = 'error';
+        message.textContent = data.error || ('Error ' + res.status);
+        result.hidden = true;
+        return;
+      }
+      message.className = 'muted';
+      message.textContent = 'Aprobado. Configura la extensión con estos datos:';
+      result.hidden = false;
+      result.textContent = 'URL del servidor: ' + data.wsUrl + '\\nToken: ' + data.token;
+    } catch (err) {
+      message.className = 'error';
+      message.textContent = 'Fallo la petición: ' + err;
+    }
+  });
+</script>
+</body>
+</html>`;
+
+// SECURITY: the MCP endpoint has no auth of its own, so it binds to loopback
+// only. Remote use goes through an ssh tunnel or a reverse proxy that adds the
+// auth — never by exposing the port directly.
+app.listen(PORT, HTTP_HOST, () => {
+  console.error(`Agent Jake Browser MCP HTTP endpoint on ${HTTP_HOST}:${PORT}/mcp`);
+  console.error(`Agent Jake Browser extension WebSocket on ${process.env.BROWSER_WS_HOST || '127.0.0.1'}:${WS_PORT}`);
+  console.error(`Extension download: ${extensionZipPath(process.env, EXTENSION_DIR)} (served at /download, version at /download/latest.json)`);
+});

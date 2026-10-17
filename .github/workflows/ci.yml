@@ -25,4 +25,3 @@ jobs:
           test -f dist/index.js
           test -f dist/http-server.js
           node dist/index.js --help
-
