@@ -32,6 +32,7 @@ export type ToolName =
   // Tab management
   | 'browser_new_tab'
   | 'browser_list_tabs'
+  | 'browser_find_tab'
   | 'browser_switch_tab'
   | 'browser_send_to_back'
   | 'browser_close_tab'

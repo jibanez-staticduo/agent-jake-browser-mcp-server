@@ -222,12 +222,13 @@ ever written into the archive — authentication comes from pairing.
 | `browser_wait_for_element` | Wait for an element to appear |
 | `browser_highlight` | Highlight an element for debugging |
 
-### Tab Management (4 tools)
+### Tab Management (5 tools)
 
 | Tool | Description |
 |------|-------------|
 | `browser_new_tab` | Open a URL in a new tab |
 | `browser_list_tabs` | List all open browser tabs |
+| `browser_find_tab` | Find open tabs whose title or URL contains a query |
 | `browser_switch_tab` | Switch to a different tab |
 | `browser_close_tab` | Close a browser tab |
 

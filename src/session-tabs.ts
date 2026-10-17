@@ -29,11 +29,12 @@
 import type { Context, ExtensionResponse, ToolName } from './types.js';
 import { logger } from './utils/logger.js';
 
-/** Commands that choose or list tabs themselves, or do not touch one. */
+/** Commands that choose, list or search tabs themselves, or do not touch one. */
 const NOT_ROUTED = new Set<ToolName>([
   'browser_new_tab',
   'browser_switch_tab',
   'browser_list_tabs',
+  'browser_find_tab',
   'browser_wait',
   'browser_reload_extension',
 ] as ToolName[]);
