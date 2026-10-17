@@ -1,0 +1,176 @@
+/**
+ * Shared type definitions for the MCP server.
+ */
+
+/**
+ * Tool names supported by the extension.
+ * These must match the handler names in the extension.
+ */
+export type ToolName =
+  // Navigation
+  | 'browser_navigate'
+  | 'browser_go_back'
+  | 'browser_go_forward'
+  | 'browser_reload'
+  // Snapshot
+  | 'browser_state'
+  | 'browser_find'
+  | 'browser_snapshot'
+  // Interaction
+  | 'browser_click'
+  | 'browser_type'
+  | 'browser_hover'
+  | 'browser_drag'
+  | 'browser_select_option'
+  | 'browser_press_key'
+  // Utility
+  | 'browser_wait'
+  | 'browser_screenshot'
+  | 'browser_pdf'
+  | 'browser_reload_extension'
+  | 'browser_get_console_logs'
+  // Tab management
+  | 'browser_new_tab'
+  | 'browser_list_tabs'
+  | 'browser_find_tab'
+  | 'browser_switch_tab'
+  | 'browser_send_to_back'
+  | 'browser_close_tab'
+  // Internal (server -> extension, never an MCP tool): close an agent window
+  | 'browser_close_window'
+  // Element queries
+  | 'browser_get_text'
+  | 'browser_get_attribute'
+  | 'browser_is_visible'
+  | 'browser_wait_for_element'
+  | 'browser_highlight'
+  | 'browser_evaluate'
+  | 'browser_get_html'
+  | 'browser_iframe_eval'
+  | 'browser_iframe_click'
+  | 'browser_upload_file'
+  | 'browser_resize_viewport'
+  // DevTools-style (console/network capture, raw CDP, drop, forms)
+  | 'browser_network_requests'
+  | 'browser_network_request'
+  | 'browser_cdp'
+  | 'browser_drop'
+  | 'browser_fill_form'
+  | 'browser_passkey'
+  // Internal to browser_save_secret: not an MCP tool, the extension answers the value to the server only
+  | 'browser_read_secret';
+
+/**
+ * Message sent to the extension via WebSocket.
+ */
+export interface ExtensionMessage {
+  id: string;
+  type: ToolName;
+  payload: Record<string, unknown>;
+}
+
+/**
+ * Response from the extension.
+ */
+export interface ExtensionResponse {
+  id: string;
+  success: boolean;
+  result?: unknown;
+  error?: {
+    code: string;
+    message: string;
+  };
+}
+
+/**
+ * MCP tool result content item.
+ */
+export interface ContentItem {
+  type: 'text' | 'image';
+  text?: string;
+  data?: string;
+  mimeType?: string;
+}
+
+/**
+ * MCP tool result.
+ */
+export interface ToolResult {
+  content: ContentItem[];
+  isError?: boolean;
+}
+
+/**
+ * A live browser connection as reported by browser_list_connections.
+ */
+export interface BrowserConnectionInfo {
+  connectionId: string;
+  /** Unique for each socket, including reconnects within the same millisecond. */
+  connectionEpoch?: string;
+  label: string;
+  clientIp?: string | null;
+  peerIp?: string | null;
+  clientIpSource?: 'socket' | 'x-real-ip' | 'x-forwarded-for';
+  userAgent: string;
+  connectedAt: number;
+  lastActiveAt: number;
+  /** Socket currently open. */
+  open: boolean;
+  /** True for the connection that tools target when none is specified. */
+  active: boolean;
+  secondsSinceLastActivity: number;
+}
+
+/**
+ * Tool schema for MCP registration.
+ */
+export interface ToolSchema {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+/**
+ * Context interface for tools.
+ *
+ * `connectionId` pins a call to one browser; without it the server targets the
+ * most recently used connection.
+ */
+export type SecretReader = (reference: string) => Promise<string>;
+
+export interface Context {
+  /** Injectable server-side secret reader; values must never enter tool results or logs. */
+  readSecret?: SecretReader;
+  send(
+    type: ToolName,
+    payload?: Record<string, unknown>,
+    connectionId?: string,
+  ): Promise<ExtensionResponse>;
+  isConnected(connectionId?: string): boolean;
+  listConnections(): BrowserConnectionInfo[];
+  waitForConnection?(timeout?: number): Promise<void>;
+  /**
+   * browser_claim_tab: take over a tab another session opened. Only the HTTP transport provides it
+   * (src/session-tabs.ts); without it there are no sessions to hand tabs between.
+   */
+  claimTab?(tabId: number): Promise<{ ok: true } | { ok: false; message: string }>;
+}
+
+/**
+ * Tool definition interface.
+ */
+export interface Tool {
+  schema: ToolSchema;
+  /**
+   * Server-side tools answer without a browser (e.g. browser_list_connections),
+   * so callers must not gate them on an active connection.
+   */
+  serverSide?: boolean;
+  /**
+   * External tools are answered by another service (a plugin, see
+   * `src/tools/plugins.ts`), so `tools/list` must not advertise the browser
+   * arguments `connection` or `tabId` on them.
+   */
+  external?: boolean;
+  handle(context: Context, params?: Record<string, unknown>): Promise<ToolResult>;
+}

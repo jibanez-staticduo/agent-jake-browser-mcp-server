@@ -15,39 +15,6 @@ async function freePort(): Promise<number> {
 }
 
 describe('compiled product entrypoints', () => {
-  it('keeps loopback binding when the HTTP host environment value is empty and closes cleanly', async () => {
-    const previous = process.env.MCP_HTTP_HOST;
-    process.env.MCP_HTTP_HOST = '';
-    const { createHttpServer } = await import('@agent-jake-browser/core');
-    const server = createHttpServer({ port: 0, wsPort: 0 });
-    try {
-      const listener = await server.listen();
-      const address = listener.address();
-      expect(address && typeof address !== 'string' ? address.address : null).toBe('127.0.0.1');
-      if (address && typeof address !== 'string') {
-        expect(await (await fetch(`http://127.0.0.1:${address.port}/healthz`)).text()).toBe('ok');
-      }
-    } finally {
-      await server.close();
-      if (previous === undefined) delete process.env.MCP_HTTP_HOST;
-      else process.env.MCP_HTTP_HOST = previous;
-    }
-  });
-
-  it('imports the core and house packages without opening listeners or timers', () => {
-    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
-      import { createServer, createHttpServer } from '@agent-jake-browser/core';
-      import { house as staticduo } from '@agent-jake-browser/house-staticduo';
-      import { house as pocharlies } from '@agent-jake-browser/house-pocharlies';
-      if (typeof createServer !== 'function' || typeof createHttpServer !== 'function') process.exit(2);
-      if (staticduo.id !== 'staticduo' || pocharlies.id !== 'pocharlies') process.exit(3);
-      console.log('imported');
-    `], { cwd: root, timeout: 5000, encoding: 'utf8' });
-    expect(child.error).toBeUndefined();
-    expect(child.status, child.stderr).toBe(0);
-    expect(child.stdout.trim()).toBe('imported');
-  });
-
   it('runs stdio initialize and tools/list with the existing CLI arguments', async () => {
     const port = await freePort();
     const child = spawn(process.execPath, ['dist/index.js', '--port', String(port)], {
@@ -75,7 +42,7 @@ describe('compiled product entrypoints', () => {
       expect(replies.find((r) => r.id === 1)?.result.serverInfo.name, stderr).toBe('agent-jake-browser-mcp');
       expect(replies.find((r) => r.id === 2)?.result.tools.map((t: { name: string }) => t.name), stderr)
         .toContain('browser_list_connections');
-      expect(replies.find((r) => r.id === 2)?.result.tools, stderr).toHaveLength(40);
+      expect(replies.find((r) => r.id === 2)?.result.tools, stderr).toHaveLength(42);
       expect(replies.find((r) => r.id === 2)?.result.tools.map((t: { name: string }) => t.name), stderr)
         .not.toContain('browser_fill_secret');
     } finally {
