@@ -275,12 +275,13 @@ always discarded on reconnect. Deploy the updated extension before this server.
 | `browser_wait_for_element` | Wait for an element to appear |
 | `browser_highlight` | Highlight an element for debugging |
 
-### Tab Management (4 tools)
+### Tab Management (6 tools)
 
 | Tool | Description |
 |------|-------------|
 | `browser_new_tab` | Open a URL in a new tab |
 | `browser_list_tabs` | List all open browser tabs |
+| `browser_find_tab` | Find open tabs whose title or URL contains a query |
 | `browser_switch_tab` | Connect to a different tab without activating it |
 | `browser_claim_tab` | Explicitly transfer an agent tab to this HTTP session |
 | `browser_close_tab` | Close a browser tab |

@@ -1,5 +1,5 @@
 /**
- * Tab management tools: newTab, listTabs, switchTab, closeTab.
+ * Tab management tools: newTab, listTabs, findTab, switchTab, claimTab, closeTab.
  */
 import { z } from 'zod';
 import { createTool, textResult, errorResult } from './types.js';
@@ -59,6 +59,33 @@ export const newTabTool: Tool = createTool({
 });
 
 /**
+ * A tab as the browser answers it: what both browser_list_tabs and browser_find_tab show.
+ */
+interface TabLine {
+  id: number;
+  title: string;
+  url: string;
+  active: boolean;
+  connected: boolean;
+}
+
+/** Older builds answered a bare array; current builds { tabs, closeById } or { query, total, tabs }. */
+function tabsOf(result: unknown): TabLine[] {
+  const raw = result as TabLine[] | { tabs?: TabLine[] } | undefined;
+  return Array.isArray(raw) ? raw : raw?.tabs ?? [];
+}
+
+function formatTabs(tabs: TabLine[]): string {
+  return tabs.map(tab => {
+    const markers = [
+      tab.active ? '(active)' : '',
+      tab.connected ? '(connected)' : '',
+    ].filter(Boolean).join(' ');
+    return `[${tab.id}] ${tab.title} ${markers}\n    ${tab.url}`;
+  }).join('\n\n');
+}
+
+/**
  * List all open tabs.
  */
 export const listTabsTool: Tool = createTool({
@@ -72,34 +99,43 @@ export const listTabsTool: Tool = createTool({
       return errorResult(response.error?.message ?? 'List tabs failed');
     }
 
-    const rawTabs = response.result as Array<{
-      id: number;
-      title: string;
-      url: string;
-      active: boolean;
-      connected: boolean;
-    }> | { tabs?: Array<{
-      id: number;
-      title: string;
-      url: string;
-      active: boolean;
-      connected: boolean;
-    }> };
-    const tabs = Array.isArray(rawTabs) ? rawTabs : rawTabs.tabs ?? [];
-
+    const tabs = tabsOf(response.result);
     if (tabs.length === 0) {
       return textResult('No tabs found');
     }
 
-    const formatted = tabs.map(tab => {
-      const markers = [
-        tab.active ? '(active)' : '',
-        tab.connected ? '(connected)' : '',
-      ].filter(Boolean).join(' ');
-      return `[${tab.id}] ${tab.title} ${markers}\n    ${tab.url}`;
-    }).join('\n\n');
+    return textResult(formatTabs(tabs));
+  },
+});
 
-    return textResult(formatted);
+/**
+ * Find tabs by title or URL: the same lines as browser_list_tabs, only the ones that match.
+ */
+export const findTabTool: Tool = createTool({
+  name: 'browser_find_tab',
+  description:
+    'Find open tabs whose title or URL contains a query (case-insensitive substring), by ID. It reads every ' +
+    'tab of the browser and touches none: nothing is attached, activated or brought forward, and it does not ' +
+    'steal another session\'s tab. To work in one you found, switch to it with browser_switch_tab.',
+  schema: z.object({
+    query: z.string().min(1).describe('Text to look for in the title or the URL of a tab'),
+    limit: z.number().int().positive().max(50).optional().default(10).describe('How many matches to return (newest first)'),
+  }),
+  async handle(context, params) {
+    const response = await context.send('browser_find_tab', { query: params.query, limit: params.limit });
+
+    if (!response.success) {
+      return errorResult(response.error?.message ?? 'Find tab failed');
+    }
+
+    const tabs = tabsOf(response.result);
+    if (tabs.length === 0) {
+      return textResult(`No tab matches "${params.query}"`);
+    }
+    const total = (response.result as { total?: number }).total ?? tabs.length;
+    const more = total > tabs.length ? ` (${total} matches, showing ${tabs.length})` : '';
+
+    return textResult(`Tabs matching "${params.query}":${more}\n\n${formatTabs(tabs)}`);
   },
 });
 
@@ -202,6 +238,7 @@ export const claimTabTool: Tool = createTool({
 export const tabTools: Tool[] = [
   newTabTool,
   listTabsTool,
+  findTabTool,
   switchTabTool,
   claimTabTool,
   sendToBackTool,

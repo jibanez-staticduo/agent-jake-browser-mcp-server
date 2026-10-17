@@ -87,6 +87,7 @@ const key = (connectionId: string, tabId: number) => `${connectionId}:${tabId}`;
 const TAB_MANAGEMENT = new Set<ToolName>([
   'browser_new_tab',
   'browser_list_tabs',
+  'browser_find_tab',
   'browser_switch_tab',
   'browser_close_tab',
   'browser_send_to_back',
