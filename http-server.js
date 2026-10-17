@@ -103,7 +103,8 @@ function annotateToolSchema(tool) {
 }
 
 function toolsListPayload() {
-  return allTools.map((tool) => annotateToolSchema(tool.schema));
+  // A plugin goes to no browser: advertising `connection` on it would invite the caller to aim it at one.
+  return allTools.map((tool) => (tool.external ? tool.schema : annotateToolSchema(tool.schema)));
 }
 
 function textContent(text, isError) {

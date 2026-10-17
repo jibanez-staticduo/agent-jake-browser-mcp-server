@@ -11,9 +11,12 @@ import { queryTools } from './queries.js';
 import { connectionsTools } from './connections.js';
 import type { Tool } from '../types.js';
 import { isSaveSecretConfigured } from '../onepassword-connect.js';
+import { getPluginTools } from './plugins.js';
 
 /**
- * Get all available tools.
+ * Get all available tools. Plugins (another service behind this server) join the
+ * same registry: they are advertised by `tools/list` and answered here, exactly
+ * like the server-side browser tools. Nothing is advertised unless configured.
  */
 export function getAllTools(): Tool[] {
   return [
@@ -25,6 +28,7 @@ export function getAllTools(): Tool[] {
     ...tabTools,
     ...queryTools,
     ...connectionsTools,
+    ...getPluginTools(),
   ].filter((tool) => tool.schema.name !== 'browser_save_secret' || isSaveSecretConfigured());
 }
 

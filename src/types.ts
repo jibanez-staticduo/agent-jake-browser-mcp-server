@@ -157,5 +157,11 @@ export interface Tool {
    * so callers must not gate them on an active connection.
    */
   serverSide?: boolean;
+  /**
+   * External tools are answered by another service (a plugin, see
+   * `src/tools/plugins.ts`), so `tools/list` must not advertise the browser
+   * arguments `connection` or `tabId` on them.
+   */
+  external?: boolean;
   handle(context: Context, params?: Record<string, unknown>): Promise<ToolResult>;
 }
