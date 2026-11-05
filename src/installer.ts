@@ -10,24 +10,28 @@ command -v curl >/dev/null || { echo 'Falta curl; no se instala nada.' >&2; exit
 command -v python3 >/dev/null || { echo 'Falta python3; no se instala nada.' >&2; exit 1; }
 command -v openssl >/dev/null || { echo 'Falta openssl con soporte Ed25519; no se instala nada.' >&2; exit 1; }
 parent="$(dirname "$DEST")"; mkdir -p "$parent"
-tmp="$(mktemp -d "$parent/.agent-jake-install.XXXXXX")"; stage="$parent/.agent-jake-stage.$$"
+tmp="$(mktemp -d "$parent/.agent-jake-install.XXXXXX")"; stage="$tmp/stage"
 cleanup() { rm -rf "$tmp" "$stage"; }; trap cleanup EXIT HUP INT TERM
 curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "$ORIGIN/download/latest.json" -o "$tmp/latest.json"
 curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "$ORIGIN/download/artifact.zip" -o "$tmp/artifact.zip"
-printf '%s' '__PUBKEY__' | base64 -d > "$tmp/release.pub"
-python3 - "$tmp/artifact.zip" "$tmp/release.pub" "$WS_URL" "$stage" "$DEST" <<'PY'
+printf '%s' '__PUBKEY__' > "$tmp/pubkey.b64"
+python3 - "$tmp/latest.json" "$tmp/artifact.zip" "$tmp/pubkey.b64" "$WS_URL" "$stage" "$DEST" <<'PY'
 import base64, hashlib, json, os, pathlib, re, subprocess, sys, zipfile
-archive, pubkey, ws_url, stage, dest = sys.argv[1:]
+latest_path, archive, pubkey_b64_path, ws_url, stage, dest = sys.argv[1:]
 try:
+    latest = json.load(open(latest_path, encoding='utf-8'))
+    pubkey = os.path.join(os.path.dirname(archive), 'release.pub')
+    open(pubkey, 'wb').write(base64.b64decode(open(pubkey_b64_path, encoding='ascii').read(), validate=True))
     with zipfile.ZipFile(archive) as z:
         listing = z.read('update-files.json')
         sig = base64.b64decode(z.read('update-files.json.sig'), validate=True)
         files = json.loads(listing)
         if not isinstance(files, dict) or not isinstance(files.get('files'), list) or not {'version','build','sha','files'} <= set(files): raise ValueError('formato de update-files.json')
+        if any(latest.get(k) != files.get(k) for k in ('version', 'build', 'sha')): raise ValueError('identidad latest no coincide')
         entries = z.infolist()
         names = [i.filename for i in entries if not i.is_dir()]
         expected_names = set(item['path'] for item in files['files']) | {'manifest.json','update-files.json','update-files.json.sig'}
-        if set(names) != expected_names: raise ValueError('listado del ZIP no coincide')
+        if len(names) != len(set(names)) or set(names) != expected_names: raise ValueError('listado del ZIP no coincide')
     expected = {}
     for item in files['files']:
         if not isinstance(item, dict) or set(item) != {'path','sha256','size'}: raise ValueError('entrada de release invalida')
@@ -35,6 +39,7 @@ try:
         if not isinstance(p, str) or not p or p.startswith('/') or '\\' in p or '..' in pathlib.PurePosixPath(p).parts: raise ValueError('ruta insegura')
         if not re.fullmatch(r'[0-9a-f]{64}', h) or not isinstance(size, int) or size < 0 or p in expected: raise ValueError('hash/tamano/ruta invalido')
         expected[p] = (h, size)
+    if 'manifest.json' not in expected: raise ValueError('manifest ausente del listado firmado')
     listing_path = os.path.join(os.path.dirname(archive), 'update-files.json'); open(listing_path, 'wb').write(listing)
     sig_path = os.path.join(os.path.dirname(archive), 'sig.bin'); open(sig_path, 'wb').write(sig)
     subprocess.run(['openssl','pkeyutl','-verify','-rawin','-pubin','-keyform','DER','-inkey',pubkey,'-in',listing_path,'-sigfile',sig_path], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -44,6 +49,7 @@ try:
             if len(data) != size or hashlib.sha256(data).hexdigest() != wanted: raise ValueError('hash de artefacto no coincide')
         manifest = json.loads(z.read('manifest.json'))
         if manifest.get('manifest_version') != 3 or not manifest.get('name'): raise ValueError('manifest invalido')
+        if manifest.get('version') != files.get('version'): raise ValueError('version del manifest no coincide')
         z.extractall(stage)
     cfg = os.path.join(stage, 'config.json')
     old_cfg = os.path.join(dest, 'config.json')
