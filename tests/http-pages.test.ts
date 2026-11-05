@@ -37,6 +37,8 @@ function page(data: unknown) {
     document: {
       getElementById: () => box,
       createElement: (tag: string) => new Element(tag),
+      // el script de la página pinta el origin en los <span class="origin"> (INFRA-932)
+      querySelectorAll: () => [],
     },
     fetch: async () => ({ json: async () => data }),
     setInterval: () => {},

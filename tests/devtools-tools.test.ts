@@ -6,6 +6,7 @@ import { mkdtemp, readFile, writeFile, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { getAllTools } from '../src/tools/index.js';
+import { getCookiesTool } from '../src/tools/queries.js';
 import type { Context, ExtensionResponse } from '../src/types.js';
 
 function fakeContext(answer: (type: string, payload: Record<string, unknown>) => unknown) {
@@ -22,6 +23,7 @@ function fakeContext(answer: (type: string, payload: Record<string, unknown>) =>
 }
 
 const tool = (name: string) => {
+  if (name === 'browser_get_cookies') return getCookiesTool;
   const t = getAllTools().find(x => x.schema.name === name);
   if (!t) throw new Error(`missing tool ${name}`);
   return t;
@@ -248,5 +250,27 @@ describe('devtools tools', () => {
     const r = await tool('browser_upload_file').handle(context, { filePath: '/tmp/a.png' });
     expect(sent[0].payload).toMatchObject({ filePath: '/tmp/a.png' });
     expect(text(r)).toBe('File uploaded: /tmp/a.png');
+  });
+
+  it('reads applicable cookies through CDP Network.getCookies, HttpOnly included', async () => {
+    process.env.AGENT_BROWSER_GET_COOKIES_ENABLED = 'true';
+    const { context, sent } = fakeContext((type) => type === 'browser_evaluate' ? 'https://platform.claude.com/app' : { cookies: [
+      { name: 'sessionKey', value: 's3cr3t', domain: 'platform.claude.com', httpOnly: true },
+    ] });
+    const r = await tool('browser_get_cookies').handle(context, {});
+    expect(sent[0]).toEqual({ type: 'browser_evaluate', payload: { code: 'location.href' } });
+    expect(sent[1]).toEqual({ type: 'browser_cdp', payload: { method: 'Network.getCookies', params: { urls: ['https://platform.claude.com/app'] } } });
+    expect(JSON.parse(text(r))[0]).toMatchObject({ name: 'sessionKey', httpOnly: true });
+    delete process.env.AGENT_BROWSER_GET_COOKIES_ENABLED;
+  });
+
+  it('rejects a cross-origin cookie URL before CDP', async () => {
+    process.env.AGENT_BROWSER_GET_COOKIES_ENABLED = 'true';
+    const { context, sent } = fakeContext(() => 'https://platform.claude.com/chat');
+    const r = await tool('browser_get_cookies').handle(context, { urls: ['https://evil.test'] });
+    expect(r.isError).toBe(true);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].type).toBe('browser_evaluate');
+    delete process.env.AGENT_BROWSER_GET_COOKIES_ENABLED;
   });
 });

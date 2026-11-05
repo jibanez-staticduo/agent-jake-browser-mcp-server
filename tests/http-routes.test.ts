@@ -6,7 +6,7 @@
  * and is driven over HTTP and WebSocket.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -485,8 +485,34 @@ describe('download without BROWSER_PUBLIC_WS_URL', () => {
     expect(page.status).toBe(200);
     expect(page.text).toContain('href="/download"');
     expect(page.text).toContain('href="/pair"');
+    expect(page.text).toContain('Instalador firmado');
     expect(page.headers.get('cache-control')).toContain('max-age');
   });
+});
+
+describe('installer (INFRA-932)', () => {
+  const hasTools = ['curl', 'unzip'].every((tool) => spawnSync('sh', ['-c', `command -v ${tool}`]).status === 0);
+
+  /** Runs the served installer with HOME in a temp dir; on Linux it opens nothing. */
+  function runInstaller(script: string, home: string) {
+    return spawnSync('bash', ['-s'], { input: script, env: { ...process.env, HOME: home }, encoding: 'utf-8' });
+  }
+
+  it('serves a signed installer script that fails closed when release metadata is absent', async () => {
+    const res = await request(primary, 'GET', '/install');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/plain');
+    expect(res.text).toContain('update-files.json');
+    expect(res.text).toContain('pkeyutl');
+    expect(spawnSync('bash', ['-n'], { input: res.text }).status).toBe(0);
+  });
+
+  it('refuses an origin that would inject shell', async () => {
+    const res = await request(primary, 'GET', '/install', { headers: { 'x-forwarded-host': "x';touch /tmp/pwn;'" } });
+    expect(res.status).toBe(400);
+    expect(res.text).not.toContain('touch');
+  });
+
 });
 
 describe('download with BROWSER_PUBLIC_WS_URL', () => {

@@ -166,10 +166,50 @@ export const highlightTool: Tool = createTool({
   },
 });
 
+/**
+ * Read the connected tab's applicable cookies through CDP Network.getCookies. Storage.getCookies
+ * is browser-context scoped and does not accept the URL filter used by this tool.
+ */
+export const getCookiesTool: Tool = createTool({
+  name: 'browser_get_cookies',
+  description: 'Cookies applicable to the connected tab via CDP Network.getCookies, including HttpOnly session cookies. Values are secrets: meant for scripts refreshing a stored session, never paste them into chat.',
+  schema: z.object({
+    urls: z.array(z.string())
+      .optional()
+      .refine(urls => !urls || urls.every(url => {
+        try { return ['http:', 'https:'].includes(new URL(url).protocol); } catch { return false; }
+      }), 'urls must contain absolute http(s) URLs')
+      .describe('Filter: only cookies that would be sent to these URLs (CDP urls param)'),
+  }),
+  async handle(context, params) {
+    if (process.env.AGENT_BROWSER_GET_COOKIES_ENABLED !== 'true') return errorResult('Cookie reading is disabled on this server.');
+    const location = await context.send('browser_evaluate', { code: 'location.href' });
+    if (!location.success || typeof location.result !== 'string') return errorResult('Could not determine the connected tab origin.');
+    let tabOrigin: string;
+    try { tabOrigin = new URL(location.result).origin; } catch { return errorResult('Connected tab URL is invalid.'); }
+    const urls = params.urls ?? [location.result];
+    if (urls.some(url => { try { return new URL(url).origin !== tabOrigin; } catch { return true; } })) {
+      return errorResult('Cookie URLs must match the connected tab origin.');
+    }
+    const response = await context.send('browser_cdp', {
+      method: 'Network.getCookies',
+      params: { urls },
+    });
+
+    if (!response.success) {
+      return errorResult(response.error?.message ?? 'Get cookies failed');
+    }
+
+    const cookies = (response.result as { cookies?: unknown[] })?.cookies ?? [];
+    return textResult(JSON.stringify(cookies, null, 2));
+  },
+});
+
 export const queryTools: Tool[] = [
   getTextTool,
   getAttributeTool,
   isVisibleTool,
   waitForElementTool,
   highlightTool,
+  getCookiesTool,
 ];

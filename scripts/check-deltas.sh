@@ -23,4 +23,5 @@ chk "SC-2102 saveSecretTool está en interactionTools" bash -c "sed -n '/^export
 chk "SC-2102 onepassword-connect.ts existe y no tiene DELETE, child_process ni node:fs" bash -c '[ -f src/onepassword-connect.ts ] && ! grep -Eq "DELETE|child_process|node:fs" src/onepassword-connect.ts'
 chk "SC-2577 plugins del servidor entran por el registro" bash -c 'test -f src/tools/plugins.ts && grep -q getPluginTools src/tools/index.ts'
 chk "SC-2577 un plugin no anuncia connection ni tabId" grep -q "tool.external ? tool.schema" src/http-server.ts
+chk "INFRA-932 instalador de la extensión en /install" bash -c "grep -q \"app.get('/install'\" src/http-server.ts && test -f src/installer.ts"
 exit $fail

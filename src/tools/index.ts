@@ -32,6 +32,7 @@ export function getAllTools(): Tool[] {
   ].filter((tool) =>
     (tool.schema.name !== 'browser_save_secret' || isSaveSecretConfigured()) &&
     (tool.schema.name !== 'browser_fill_secret' || process.env.AGENT_BROWSER_FILL_SECRET_ENABLED === 'true')
+    && (tool.schema.name !== 'browser_get_cookies' || process.env.AGENT_BROWSER_GET_COOKIES_ENABLED === 'true')
   );
 }
 
