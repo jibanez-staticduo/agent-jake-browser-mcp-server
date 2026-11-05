@@ -36,7 +36,7 @@ try:
     for item in files['files']:
         if not isinstance(item, dict) or set(item) != {'path','sha256','size'}: raise ValueError('entrada de release invalida')
         p, h, size = item['path'], item['sha256'], item['size']
-        if not isinstance(p, str) or not p or p.startswith('/') or '\\' in p or '..' in pathlib.PurePosixPath(p).parts: raise ValueError('ruta insegura')
+        if not isinstance(p, str) or not p or p.startswith('/') or chr(92) in p or '..' in pathlib.PurePosixPath(p).parts: raise ValueError('ruta insegura')
         if not re.fullmatch(r'[0-9a-f]{64}', h) or not isinstance(size, int) or size < 0 or p in expected: raise ValueError('hash/tamano/ruta invalido')
         expected[p] = (h, size)
     if 'manifest.json' not in expected: raise ValueError('manifest ausente del listado firmado')
