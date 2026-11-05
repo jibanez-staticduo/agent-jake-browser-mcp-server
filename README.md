@@ -161,7 +161,7 @@ can also carry private data, so use these tools only with trusted MCP clients.
 | --- | --- |
 | `POST /mcp` (plus `GET`/`DELETE`) | MCP streamable HTTP endpoint. |
 | `GET /` | Small page with the install command, the download link, the pairing link and the live connection list. |
-| `GET /install` | Installer for `curl -fsSL <origin>/install \| bash`: puts `/download` in `~/Downloads/agent-jake-browser` (the self-updating folder), opens `chrome://extensions` and the folder on macOS, and prints Chrome's two manual steps (developer mode, load the folder) plus pairing. `400` when the origin is not a plain http(s) origin. |
+| `GET /install` | Temporarily disabled (`503`) until `/download` artifacts have a separately verified release signature. Use `/download` and load the ZIP manually from `chrome://extensions`; the route never executes an unverified archive. |
 | `GET /download` | Serves the extension zip (`BROWSER_EXTENSION_ZIP`, else the published one). |
 | `GET /download/latest.json` | The newest published extension build (`version`, `build`, `sha`, `publishedAt`); 404 when none. Installed extensions check it at startup and every 30 min. |
 | `GET /connections` | JSON: auth status, derived wsUrl and the current connections. |

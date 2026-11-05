@@ -92,7 +92,7 @@ describe('browser_passkey with source "1password" (INFRA-374)', () => {
     clicked: 'e7',
     passkey: {
       mode: 'use', host: 'accounts.google.com', ceremony: 'completed', passkeys: [],
-      source: '1password', rpId: 'google.com', landedOn: 'https://admin.google.com/',
+      source: '1password', rpId: 'google.com', landedOn: 'https://user:secret@admin.google.com/login?code=CANARIO#fragment',
       // Canary: whatever the extension answers, none of this belongs in the log line.
       privateKey: 'CANARIO-PKCS8', userHandle: 'CANARIO-HANDLE',
     },
@@ -126,7 +126,7 @@ describe('browser_passkey with source "1password" (INFRA-374)', () => {
       payload: { ref: 'e7', selector: undefined, mode: 'use', source: '1password', rpIds: ['google.com', 'shopify.com'] },
     }]);
     expect(isError(r)).toBe(false);
-    expect(text(r)).toBe('Clicked on e7. Signed in with the 1Password passkey for google.com on accounts.google.com; the page moved on to https://admin.google.com/.');
+    expect(text(r)).toBe('Clicked on e7. Signed in with the 1Password passkey for google.com on accounts.google.com; the page moved on to https://admin.google.com/login.');
   });
 
   it('a timeout of a 1Password ceremony does not talk about the agent vault', async () => {
@@ -150,7 +150,9 @@ describe('browser_passkey with source "1password" (INFRA-374)', () => {
     expect(line).toContain('mode=use');
     expect(line).toContain('source=1password');
     expect(line).toContain('result=completed');
-    expect(line).toContain('landedOn=https://admin.google.com/');
+    expect(line).toContain('landedOn=https://admin.google.com/login');
+    expect(line).not.toContain('secret');
+    expect(line).not.toContain('code=');
     expect(line).not.toContain('CANARIO');
     logged.mockRestore();
   });

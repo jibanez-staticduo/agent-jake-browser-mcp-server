@@ -13,7 +13,6 @@ import { getSharedTokenStore } from './token-store.js';
 import { createPairingStore } from './pairing-store.js';
 import { patchZipConfig } from './extension-zip.js';
 import { extensionZipPath, readPublishedVersion } from './published-extension.js';
-import { installerScript } from './installer.js';
 import { parseLabels, nameOf, resolveTarget, findConnection } from './connection-target.js';
 import { createTabReaper, idleMinutesFromEnv } from './tab-reaper.js';
 import { createSessionTabs, acceptsExplicitTab } from './session-tabs.js';
@@ -369,10 +368,12 @@ app.get('/download', async (_req, res) => {
 
 // `curl -fsSL <origin>/install | bash` installs the extension (INFRA-932, src/installer.ts).
 app.get('/install', (req, res) => {
-  const script = installerScript(publicOrigin(req));
-  if (!script) return res.status(400).type('text/plain; charset=utf-8').send('Origen no válido para el instalador.\n');
-  res.setHeader('Cache-Control', 'no-cache');
-  return res.type('text/plain; charset=utf-8').send(script);
+  // Fail closed until the release feed carries a separately verified signature.
+  // Serving a curl|bash installer for an unsigned ZIP would turn the route into a trust boundary.
+  return res.status(503).type('text/plain; charset=utf-8').send(
+    'Instalador automatico temporalmente deshabilitado: el artefacto no tiene firma verificable. ' +
+    'Descarga /download y carga la extension manualmente desde chrome://extensions.\n',
+  );
 });
 
 app.get('/', (_req, res) => {
@@ -558,7 +559,7 @@ const INDEX_HTML = `<!doctype html>
 <h1>Agent Jake Browser MCP</h1>
 <p class="muted">Servidor MCP que pilota los navegadores conectados por extensión.</p>
 <ul>
-  <li>Instalar la extensión en este equipo: <code>curl -fsSL <span class="origin"></span>/install | bash</code></li>
+  <li>Instalador automatico temporalmente deshabilitado hasta verificar la firma del artefacto; usa <a href="/download">/download</a> y carga la extension manualmente.</li>
   <li><a href="/download">Descargar la extensión</a> (zip con esta URL y token embebidos si usas el flujo de pairing)</li>
   <li><a href="/pair">Aprobar un código de pairing</a></li>
   <li><code>/mcp</code> — endpoint MCP (streamable HTTP)</li>
@@ -566,7 +567,6 @@ const INDEX_HTML = `<!doctype html>
 <h2>Conexiones ahora mismo</h2>
 <div id="connections" class="muted">Cargando…</div>
 <script>
-document.querySelectorAll('.origin').forEach((el) => { el.textContent = location.origin; });
 async function load() {
   const box = document.getElementById('connections');
   try {

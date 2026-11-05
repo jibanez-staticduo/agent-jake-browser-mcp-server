@@ -666,9 +666,11 @@ export const passkeyTool: Tool = createTool({
     const rpIds = params.source === '1password' ? onePasswordPasskeyRpIds() : [];
     if (params.source === '1password') {
       if (params.mode === 'enroll') {
+        logPasskeyCeremony(params.mode, params.source, undefined, 'denied-enroll');
         return errorResult('PASSKEY_1PASSWORD_ENROLL_REFUSED: 1Password passkeys are Dani\'s vault and the agent only signs in with them (mode "use"). To enroll a passkey of the agent itself, use source "agent".');
       }
       if (!rpIds.length) {
+        logPasskeyCeremony(params.mode, params.source, undefined, 'denied-allowlist');
         return errorResult('PASSKEY_1PASSWORD_DISABLED: this server allows no site for 1Password passkeys (AGENT_BROWSER_1P_PASSKEY_RPIDS is empty). Use source "agent", or ask for the rpIds to be set.');
       }
     }
@@ -726,8 +728,18 @@ function logPasskeyCeremony(
   result: string,
 ): void {
   const rp = passkey ? (passkey.source === '1password' ? passkey.rpId ?? '-' : passkey.passkeys.map((k) => k.rpId).join('|') || '-') : '-';
-  const landed = passkey?.landedOn ? ` landedOn=${passkey.landedOn}` : '';
+  const landed = passkey?.landedOn ? ` landedOn=${safeLandingUrl(passkey.landedOn)}` : '';
   logger.info(`[passkey] host=${passkey?.host ?? '-'} rpId=${rp} mode=${mode} source=${source} result=${result}${landed}`);
+}
+
+/** Keep path-level landing evidence while dropping credentials, query and fragment secrets. */
+function safeLandingUrl(raw: string): string {
+  try {
+    const url = new URL(raw);
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return '-';
+  }
 }
 
 export function describePasskey(p: PasskeyOutcome): string {
@@ -737,7 +749,7 @@ export function describePasskey(p: PasskeyOutcome): string {
     if (p.ceremony === 'timeout') {
       return `1Password signed no one in on ${p.host}: the page never moved (1Password locked, or no passkey for this site).`;
     }
-    return `Signed in with the 1Password passkey for ${p.rpId ?? p.host} on ${p.host}; the page moved on to ${p.landedOn ?? 'the site'}.`;
+    return `Signed in with the 1Password passkey for ${p.rpId ?? p.host} on ${p.host}; the page moved on to ${p.landedOn ? safeLandingUrl(p.landedOn) : 'the site'}.`;
   }
   if (p.ceremony === 'timeout') {
     return `Passkey ${p.mode} on ${p.host}: the site asked for no passkey within the wait (passkeys for this host: ${which}).`;
