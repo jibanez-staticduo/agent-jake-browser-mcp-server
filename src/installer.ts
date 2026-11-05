@@ -1,67 +1,70 @@
-/**
- * GET /install (INFRA-932): the installer of the extension, as a bash script for
- * `curl -fsSL <origin>/install | bash`. It downloads /download into
- * ~/Downloads/agent-jake-browser, the folder the extension rewrites by itself on every
- * published build, and leaves Chrome's two manual steps in sight: branded Chrome loads a
- * private extension only with developer mode on and the folder loaded by hand
- * (--load-extension is gone since Chrome 137; a forcelist policy needs an MDM-managed Mac).
- *
- * The origin ends up inside the shell script and comes from request headers, so anything
- * that is not a plain http(s) origin is refused.
- */
+/** Signed, fail-closed installer for the neutral extension release artifact. */
 const ORIGIN_RE = /^https?:\/\/[A-Za-z0-9.-]+(:\d{1,5})?$/;
+const WS_RE = /^wss?:\/\/[A-Za-z0-9.-]+(:\d{1,5})?(\/[-A-Za-z0-9._~%!$&()*+,;=:@\/]*)?$/;
+const PUBLIC_KEY_DER_B64 = 'MCowBQYDK2VwAyEA8c8tp8Jvr8S8GnkZHdL79/6y9f/99sisBAooeem1wRQ=';
 
-// No `${` nor backticks inside: this is a JS template literal.
 const SCRIPT = `#!/usr/bin/env bash
-# Instalador de la extensión de agent-jake (INFRA-932). La deja en Descargas/agent-jake-browser,
-# la carpeta que la extensión reescribe sola con cada versión publicada.
 set -euo pipefail
-
-ORIGIN='__ORIGIN__'
-DEST="$HOME/Downloads/agent-jake-browser"
-
-if [ -e "$DEST" ] && [ ! -f "$DEST/manifest.json" ]; then
-  echo "$DEST existe y no es una extensión: no la toco. Muévela y vuelve a lanzar el instalador." >&2
-  exit 1
+ORIGIN='__ORIGIN__'; WS_URL='__WS_URL__'; DEST="$HOME/Downloads/agent-jake-browser"
+command -v curl >/dev/null || { echo 'Falta curl; no se instala nada.' >&2; exit 1; }
+command -v python3 >/dev/null || { echo 'Falta python3; no se instala nada.' >&2; exit 1; }
+command -v openssl >/dev/null || { echo 'Falta openssl con soporte Ed25519; no se instala nada.' >&2; exit 1; }
+parent="$(dirname "$DEST")"; mkdir -p "$parent"
+tmp="$(mktemp -d "$parent/.agent-jake-install.XXXXXX")"; stage="$parent/.agent-jake-stage.$$"
+cleanup() { rm -rf "$tmp" "$stage"; }; trap cleanup EXIT HUP INT TERM
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "$ORIGIN/download/latest.json" -o "$tmp/latest.json"
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "$ORIGIN/download/artifact.zip" -o "$tmp/artifact.zip"
+printf '%s' '__PUBKEY__' | base64 -d > "$tmp/release.pub"
+python3 - "$tmp/artifact.zip" "$tmp/release.pub" "$WS_URL" "$stage" "$DEST" <<'PY'
+import base64, hashlib, json, os, pathlib, re, subprocess, sys, zipfile
+archive, pubkey, ws_url, stage, dest = sys.argv[1:]
+try:
+    with zipfile.ZipFile(archive) as z:
+        listing = z.read('update-files.json')
+        sig = base64.b64decode(z.read('update-files.json.sig'), validate=True)
+        files = json.loads(listing)
+        if not isinstance(files, dict) or not isinstance(files.get('files'), list) or not {'version','build','sha','files'} <= set(files): raise ValueError('formato de update-files.json')
+        entries = z.infolist()
+        names = [i.filename for i in entries if not i.is_dir()]
+        expected_names = set(item['path'] for item in files['files']) | {'manifest.json','update-files.json','update-files.json.sig'}
+        if set(names) != expected_names: raise ValueError('listado del ZIP no coincide')
+    expected = {}
+    for item in files['files']:
+        if not isinstance(item, dict) or set(item) != {'path','sha256','size'}: raise ValueError('entrada de release invalida')
+        p, h, size = item['path'], item['sha256'], item['size']
+        if not isinstance(p, str) or not p or p.startswith('/') or '\\' in p or '..' in pathlib.PurePosixPath(p).parts: raise ValueError('ruta insegura')
+        if not re.fullmatch(r'[0-9a-f]{64}', h) or not isinstance(size, int) or size < 0 or p in expected: raise ValueError('hash/tamano/ruta invalido')
+        expected[p] = (h, size)
+    listing_path = os.path.join(os.path.dirname(archive), 'update-files.json'); open(listing_path, 'wb').write(listing)
+    sig_path = os.path.join(os.path.dirname(archive), 'sig.bin'); open(sig_path, 'wb').write(sig)
+    subprocess.run(['openssl','pkeyutl','-verify','-rawin','-pubin','-keyform','DER','-inkey',pubkey,'-in',listing_path,'-sigfile',sig_path], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with zipfile.ZipFile(archive) as z:
+        for name, (wanted, size) in expected.items():
+            data = z.read(name)
+            if len(data) != size or hashlib.sha256(data).hexdigest() != wanted: raise ValueError('hash de artefacto no coincide')
+        manifest = json.loads(z.read('manifest.json'))
+        if manifest.get('manifest_version') != 3 or not manifest.get('name'): raise ValueError('manifest invalido')
+        z.extractall(stage)
+    cfg = os.path.join(stage, 'config.json')
+    old_cfg = os.path.join(dest, 'config.json')
+    if os.path.isfile(old_cfg) and not os.path.islink(old_cfg):
+        pathlib.Path(cfg).write_bytes(pathlib.Path(old_cfg).read_bytes())
+    elif not os.path.lexists(cfg):
+        json.dump({'version':1, 'wsUrl':ws_url}, open(cfg, 'w', encoding='utf-8'), separators=(',', ':'))
+except Exception as exc:
+    print('No se instala: artefacto o firma no verificable (%s).' % exc, file=sys.stderr); sys.exit(1)
+PY
+if [ -e "$DEST" ] || [ -L "$DEST" ]; then
+  [ -d "$DEST" ] && [ -f "$DEST/manifest.json" ] && [ ! -L "$DEST" ] || { echo 'Destino existente no es una extension verificada; no se toca.' >&2; exit 1; }
+  mv -- "$DEST" "$DEST.backup.$(date +%s)"
 fi
-
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
-
-echo "Descargando la extensión de $ORIGIN/download"
-curl -fsSL "$ORIGIN/download" -o "$tmp/extension.zip"
-mkdir "$tmp/extension"
-unzip -q "$tmp/extension.zip" -d "$tmp/extension"
-if [ ! -f "$tmp/extension/manifest.json" ]; then
-  echo "El zip de $ORIGIN/download no trae manifest.json en la raíz: no instalo nada." >&2
-  exit 1
-fi
-
-mkdir -p "$(dirname "$DEST")"
-rm -rf "$DEST"
-mv "$tmp/extension" "$DEST"
-version="$(sed -n 's/.*"version": *"\\([^"]*\\)".*/\\1/p' "$DEST/manifest.json" | head -n 1)"
-
-if [ "$(uname -s)" = Darwin ]; then
-  open -a "Google Chrome" "chrome://extensions" || echo "No he podido abrir Chrome: abre chrome://extensions a mano."
-  open -R "$DEST"
-fi
-
-cat <<EOF
-
-Extensión $version instalada en $DEST.
-
-Falta, una sola vez, en Chrome:
-  1. En chrome://extensions, activa «Modo desarrollador» (arriba a la derecha).
-  2. Arrastra la carpeta agent-jake-browser a esa página (o «Cargar descomprimida» y elígela).
-     Si ya estaba cargada desde esa carpeta, pulsa el botón de recargar de su tarjeta.
-  3. En la extensión, Opciones → «Emparejar con el servidor», y aprueba el código en $ORIGIN/pair.
-  4. Para que se actualice sola: Ajustes → Descargas → desactiva «Preguntar dónde guardar cada archivo».
-EOF
+mv -- "$stage" "$DEST"
+echo "Extension verificada instalada en $DEST. Carga la carpeta desde chrome://extensions."
 `;
 
-/** The installer with `origin` baked in, or null when `origin` is not a plain http(s) origin. */
-export function installerScript(origin: string): string | null {
-  if (!ORIGIN_RE.test(origin)) return null;
-  return SCRIPT.replace('__ORIGIN__', origin);
+export function installerScript(origin: string, wsUrl: string): string | null {
+  if (!ORIGIN_RE.test(origin) || !WS_RE.test(wsUrl)) return null;
+  return SCRIPT.replace('__ORIGIN__', origin).replace('__WS_URL__', wsUrl).replace('__PUBKEY__', PUBLIC_KEY_DER_B64);
 }
+
+export const installerPublicKey = PUBLIC_KEY_DER_B64;

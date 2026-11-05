@@ -42,8 +42,8 @@ describe('compiled product entrypoints', () => {
       expect(replies.find((r) => r.id === 1)?.result.serverInfo.name, stderr).toBe('agent-jake-browser-mcp');
       expect(replies.find((r) => r.id === 2)?.result.tools.map((t: { name: string }) => t.name), stderr)
         .toContain('browser_list_connections');
-      // 42 de upstream + browser_get_cookies (fork)
-      expect(replies.find((r) => r.id === 2)?.result.tools, stderr).toHaveLength(43);
+      // Cookie export is gated off by default in production.
+      expect(replies.find((r) => r.id === 2)?.result.tools, stderr).toHaveLength(42);
       expect(replies.find((r) => r.id === 2)?.result.tools.map((t: { name: string }) => t.name), stderr)
         .not.toContain('browser_fill_secret');
     } finally {

@@ -182,9 +182,18 @@ export const getCookiesTool: Tool = createTool({
       .describe('Filter: only cookies that would be sent to these URLs (CDP urls param)'),
   }),
   async handle(context, params) {
+    if (process.env.AGENT_BROWSER_GET_COOKIES_ENABLED !== 'true') return errorResult('Cookie reading is disabled on this server.');
+    const location = await context.send('browser_evaluate', { code: 'location.href' });
+    if (!location.success || typeof location.result !== 'string') return errorResult('Could not determine the connected tab origin.');
+    let tabOrigin: string;
+    try { tabOrigin = new URL(location.result).origin; } catch { return errorResult('Connected tab URL is invalid.'); }
+    const urls = params.urls ?? [tabOrigin];
+    if (urls.some(url => { try { return new URL(url).origin !== tabOrigin; } catch { return true; } })) {
+      return errorResult('Cookie URLs must match the connected tab origin.');
+    }
     const response = await context.send('browser_cdp', {
       method: 'Network.getCookies',
-      params: params.urls ? { urls: params.urls } : {},
+      params: { urls },
     });
 
     if (!response.success) {

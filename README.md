@@ -136,6 +136,7 @@ also works while nothing is connected.
 | `AGENT_BROWSER_OP_BIN` | `op` | Reader binary for `browser_fill_secret`, invoked as `<bin> read <op://ref>` on the server machine to pull a 1Password secret without it crossing the transcript. |
 | `AGENT_BROWSER_OPP_BIN` | unset (`op-personal://` refused) | Reader for `op-personal://vault/item/field` in `browser_fill_secret`: invoked without a shell as `<bin> [AGENT_BROWSER_OPP_ARGS…] resolve-for-fill op://vault/item/field`, value on stdout. In production, `bridge/op-mcp-ssh` of `pocharlies-org/op-mcp-personal` (see below). Never falls back to `op`. |
 | `AGENT_BROWSER_OPP_ARGS` | empty | Fixed leading arguments for `AGENT_BROWSER_OPP_BIN`, space-separated (`--client agent-jake`). |
+| `AGENT_BROWSER_GET_COOKIES_ENABLED` | unset (disabled) | Set exactly `true` to expose `browser_get_cookies`; URLs are restricted to the connected tab origin. |
 | `OP_CONNECT_HOST` | unset | HTTP(S) origin of a 1Password Connect server (`http://host:8080`), without credentials, path, query or fragment. The `op` wrapper of the pod uses it for `browser_fill_secret`, and `browser_save_secret` writes through it. |
 | `OP_CONNECT_WRITE_TOKEN` | unset | Connect token WITH write access, separate from the read-only `OP_CONNECT_TOKEN`. Without it `browser_save_secret` answers `SAVE_SECRET_NOT_CONFIGURED`. Seed it with `tr -d '\n'`. |
 | `AGENT_BROWSER_SAVE_VAULTS` | unset | Comma-separated 26-character vault IDs `browser_save_secret` may write to (the in-pod wall behind the token's own scope). Empty means `SAVE_SECRET_NOT_CONFIGURED`. |
@@ -161,9 +162,10 @@ can also carry private data, so use these tools only with trusted MCP clients.
 | --- | --- |
 | `POST /mcp` (plus `GET`/`DELETE`) | MCP streamable HTTP endpoint. |
 | `GET /` | Small page with the install command, the download link, the pairing link and the live connection list. |
-| `GET /install` | Temporarily disabled (`503`) until `/download` artifacts have a separately verified release signature. Use `/download` and load the ZIP manually from `chrome://extensions`; the route never executes an unverified archive. |
+| `GET /install` | Signed installer for `curl -fsSL <origin>/install \| bash`; requires python3 and OpenSSL Ed25519 support, and verifies the exact signed ZIP file listing before staged installation. |
 | `GET /download` | Serves the extension zip (`BROWSER_EXTENSION_ZIP`, else the published one). |
 | `GET /download/latest.json` | The newest published extension build (`version`, `build`, `sha`, `publishedAt`); 404 when none. Installed extensions check it at startup and every 30 min. |
+| `GET /download/update-files.json` / `.sig` | Signed release file listing and Ed25519 signature consumed by `/install`; 404 when the release feed is incomplete. |
 | `GET /connections` | JSON: auth status, derived wsUrl and the current connections. |
 | `POST /pair/start` | Extension registers a one-time code (`{otp, connectionId?, label?}`), valid 10 minutes. |
 | `GET /pair` | Approval page, prefilled from `?otp=`. |

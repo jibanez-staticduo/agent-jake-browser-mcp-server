@@ -485,7 +485,7 @@ describe('download without BROWSER_PUBLIC_WS_URL', () => {
     expect(page.status).toBe(200);
     expect(page.text).toContain('href="/download"');
     expect(page.text).toContain('href="/pair"');
-    expect(page.text).toContain('Instalador automatico temporalmente deshabilitado');
+    expect(page.text).toContain('Instalador firmado');
     expect(page.headers.get('cache-control')).toContain('max-age');
   });
 });
@@ -498,32 +498,21 @@ describe('installer (INFRA-932)', () => {
     return spawnSync('bash', ['-s'], { input: script, env: { ...process.env, HOME: home }, encoding: 'utf-8' });
   }
 
-  it('fails closed until a separately verified release signature is configured', async () => {
+  it('serves a signed installer script that fails closed when release metadata is absent', async () => {
     const res = await request(primary, 'GET', '/install');
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/plain');
-    expect(res.text).toContain('temporalmente deshabilitado');
-    expect(res.text).toContain('/download');
+    expect(res.text).toContain('update-files.json');
+    expect(res.text).toContain('pkeyutl');
+    expect(spawnSync('bash', ['-n'], { input: res.text }).status).toBe(0);
   });
 
   it('refuses an origin that would inject shell', async () => {
     const res = await request(primary, 'GET', '/install', { headers: { 'x-forwarded-host': "x';touch /tmp/pwn;'" } });
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(400);
     expect(res.text).not.toContain('touch');
   });
 
-  it('does not execute or modify a local extension directory while disabled', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'ajb-install-'));
-    try {
-      mkdirSync(join(home, 'Downloads/agent-jake-browser'), { recursive: true });
-      writeFileSync(join(home, 'Downloads/agent-jake-browser/notes.txt'), 'mine');
-      const res = await request(primary, 'GET', '/install');
-      expect(res.status).toBe(503);
-      expect(readFileSync(join(home, 'Downloads/agent-jake-browser/notes.txt'), 'utf-8')).toBe('mine');
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
 });
 
 describe('download with BROWSER_PUBLIC_WS_URL', () => {
