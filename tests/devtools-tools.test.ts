@@ -254,12 +254,12 @@ describe('devtools tools', () => {
 
   it('reads applicable cookies through CDP Network.getCookies, HttpOnly included', async () => {
     process.env.AGENT_BROWSER_GET_COOKIES_ENABLED = 'true';
-    const { context, sent } = fakeContext((type) => type === 'browser_evaluate' ? 'https://platform.claude.com/chat' : { cookies: [
+    const { context, sent } = fakeContext((type) => type === 'browser_evaluate' ? 'https://platform.claude.com/app' : { cookies: [
       { name: 'sessionKey', value: 's3cr3t', domain: 'platform.claude.com', httpOnly: true },
     ] });
-    const r = await tool('browser_get_cookies').handle(context, { urls: ['https://platform.claude.com'] });
+    const r = await tool('browser_get_cookies').handle(context, {});
     expect(sent[0]).toEqual({ type: 'browser_evaluate', payload: { code: 'location.href' } });
-    expect(sent[1]).toEqual({ type: 'browser_cdp', payload: { method: 'Network.getCookies', params: { urls: ['https://platform.claude.com'] } } });
+    expect(sent[1]).toEqual({ type: 'browser_cdp', payload: { method: 'Network.getCookies', params: { urls: ['https://platform.claude.com/app'] } } });
     expect(JSON.parse(text(r))[0]).toMatchObject({ name: 'sessionKey', httpOnly: true });
     delete process.env.AGENT_BROWSER_GET_COOKIES_ENABLED;
   });

@@ -187,7 +187,7 @@ export const getCookiesTool: Tool = createTool({
     if (!location.success || typeof location.result !== 'string') return errorResult('Could not determine the connected tab origin.');
     let tabOrigin: string;
     try { tabOrigin = new URL(location.result).origin; } catch { return errorResult('Connected tab URL is invalid.'); }
-    const urls = params.urls ?? [tabOrigin];
+    const urls = params.urls ?? [location.result];
     if (urls.some(url => { try { return new URL(url).origin !== tabOrigin; } catch { return true; } })) {
       return errorResult('Cookie URLs must match the connected tab origin.');
     }

@@ -55,7 +55,7 @@ try:
     old_cfg = os.path.join(dest, 'config.json')
     if os.path.isfile(old_cfg) and not os.path.islink(old_cfg):
         pathlib.Path(cfg).write_bytes(pathlib.Path(old_cfg).read_bytes())
-    elif not os.path.lexists(cfg):
+    else:
         json.dump({'version':1, 'wsUrl':ws_url}, open(cfg, 'w', encoding='utf-8'), separators=(',', ':'))
 except Exception as exc:
     print('No se instala: artefacto o firma no verificable (%s).' % exc, file=sys.stderr); sys.exit(1)

@@ -18,7 +18,10 @@ describe('signed installer embedded verifier', () => {
     const zip = new AdmZip();
     const manifest = Buffer.from(JSON.stringify({ manifest_version: 3, name: 'test', version: files.version }));
     zip.addFile('manifest.json', manifest);
+    zip.addFile('config.json', Buffer.from(JSON.stringify({ version: 1, wsUrl: 'wss://stale.invalid/ws' })));
     files.files.push({ path: 'manifest.json', sha256: createHash('sha256').update(manifest).digest('hex'), size: manifest.length });
+    const stale = Buffer.from(JSON.stringify({ version: 1, wsUrl: 'wss://stale.invalid/ws' }));
+    files.files.push({ path: 'config.json', sha256: createHash('sha256').update(stale).digest('hex'), size: stale.length });
     const listing = Buffer.from(JSON.stringify(files));
     zip.addFile('update-files.json', listing);
     zip.addFile('update-files.json.sig', Buffer.from(sign(null, listing, privateKey).toString('base64')));
@@ -29,5 +32,6 @@ describe('signed installer embedded verifier', () => {
     const result = spawnSync('bash', ['-s'], { input: script, encoding: 'utf8', env: { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, QA_BUNDLE: bundle } });
     expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(readFileSync(join(home, 'Downloads/agent-jake-browser/manifest.json'), 'utf8')).version).toBe(files.version);
+    expect(readFileSync(join(home, 'Downloads/agent-jake-browser/config.json',), 'utf8')).toBe('{"version":1,"wsUrl":"wss://qa.invalid/ws"}');
   });
 });
