@@ -249,4 +249,13 @@ describe('devtools tools', () => {
     expect(sent[0].payload).toMatchObject({ filePath: '/tmp/a.png' });
     expect(text(r)).toBe('File uploaded: /tmp/a.png');
   });
+
+  it('reads applicable cookies through CDP Network.getCookies, HttpOnly included', async () => {
+    const { context, sent } = fakeContext(() => ({ cookies: [
+      { name: 'sessionKey', value: 's3cr3t', domain: 'platform.claude.com', httpOnly: true },
+    ] }));
+    const r = await tool('browser_get_cookies').handle(context, { urls: ['https://platform.claude.com'] });
+    expect(sent[0]).toEqual({ type: 'browser_cdp', payload: { method: 'Network.getCookies', params: { urls: ['https://platform.claude.com'] } } });
+    expect(JSON.parse(text(r))[0]).toMatchObject({ name: 'sessionKey', httpOnly: true });
+  });
 });

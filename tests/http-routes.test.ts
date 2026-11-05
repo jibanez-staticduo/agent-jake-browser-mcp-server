@@ -6,7 +6,7 @@
  * and is driven over HTTP and WebSocket.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -485,7 +485,65 @@ describe('download without BROWSER_PUBLIC_WS_URL', () => {
     expect(page.status).toBe(200);
     expect(page.text).toContain('href="/download"');
     expect(page.text).toContain('href="/pair"');
+    expect(page.text).toContain('/install | bash');
     expect(page.headers.get('cache-control')).toContain('max-age');
+  });
+});
+
+describe('installer (INFRA-932)', () => {
+  const hasTools = ['curl', 'unzip'].every((tool) => spawnSync('sh', ['-c', `command -v ${tool}`]).status === 0);
+
+  /** Runs the served installer with HOME in a temp dir; on Linux it opens nothing. */
+  function runInstaller(script: string, home: string) {
+    return spawnSync('bash', ['-s'], { input: script, env: { ...process.env, HOME: home }, encoding: 'utf-8' });
+  }
+
+  it('serves a bash script with this server as origin', async () => {
+    const res = await request(primary, 'GET', '/install');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/plain');
+    expect(res.headers.get('cache-control')).toBe('no-cache');
+    expect(res.text).toContain(`ORIGIN='${primary.httpBase}'`);
+    expect(res.text).not.toContain('__ORIGIN__');
+    expect(spawnSync('bash', ['-n'], { input: res.text }).status).toBe(0);
+  });
+
+  it('refuses an origin that would inject shell', async () => {
+    const res = await request(primary, 'GET', '/install', { headers: { 'x-forwarded-host': "x';touch /tmp/pwn;'" } });
+    expect(res.status).toBe(400);
+    expect(res.text).not.toContain('touch');
+  });
+
+  it.skipIf(!hasTools)('installs /download into ~/Downloads/agent-jake-browser', async () => {
+    const script = (await request(primary, 'GET', '/install')).text;
+    const home = mkdtempSync(join(tmpdir(), 'ajb-install-'));
+    try {
+      const run = runInstaller(script, home);
+      expect(run.status, run.stderr).toBe(0);
+      const manifest = JSON.parse(readFileSync(join(home, 'Downloads/agent-jake-browser/manifest.json'), 'utf-8'));
+      expect(manifest.name).toBe('ajb-test');
+      expect(run.stdout).toContain('Extensión 1.0.0 instalada');
+      expect(run.stdout).toContain(`${primary.httpBase}/pair`);
+      // A second run replaces the build in place.
+      expect(runInstaller(script, home).status).toBe(0);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!hasTools)('leaves a folder that is not an extension alone', async () => {
+    const script = (await request(primary, 'GET', '/install')).text;
+    const home = mkdtempSync(join(tmpdir(), 'ajb-install-'));
+    try {
+      mkdirSync(join(home, 'Downloads/agent-jake-browser'), { recursive: true });
+      writeFileSync(join(home, 'Downloads/agent-jake-browser/notes.txt'), 'mine');
+      const run = runInstaller(script, home);
+      expect(run.status).toBe(1);
+      expect(run.stderr).toContain('no es una extensión');
+      expect(readFileSync(join(home, 'Downloads/agent-jake-browser/notes.txt'), 'utf-8')).toBe('mine');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 

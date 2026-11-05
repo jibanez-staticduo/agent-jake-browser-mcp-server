@@ -3,7 +3,7 @@
  * ceremony without key material (the extension never sends it), and every way the extension
  * can fall short is an error, never a silent plain click.
  */
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getAllTools } from '../src/tools/index.js';
 import { fakeContext } from './helpers/fake-context.js';
 import type { Context, ExtensionResponse } from '../src/types.js';
@@ -28,7 +28,10 @@ describe('browser_passkey', () => {
   it('use: forwards mode and target and reports the sign-in', async () => {
     const { context, sent } = fakeContext(shopify());
     const r = await tool.handle(context, { ref: 'e3', mode: 'use' });
-    expect(sent).toEqual([{ type: 'browser_passkey', payload: { ref: 'e3', selector: undefined, mode: 'use' } }]);
+    expect(sent).toEqual([{
+      type: 'browser_passkey',
+      payload: { ref: 'e3', selector: undefined, mode: 'use', source: 'agent', rpIds: [] },
+    }]);
     expect(isError(r)).toBe(false);
     expect(text(r)).toBe('Clicked on e3. Signed in with the agent passkey for accounts.shopify.com on accounts.shopify.com.');
   });
@@ -76,5 +79,86 @@ describe('browser_passkey', () => {
       expect(sent).toEqual([]);
       expect(isError(r)).toBe(true);
     }
+  });
+});
+
+/**
+ * INFRA-374: source "1password" — the passkey of Dani's 1Password signs in the page. The server
+ * never sees a key: it refuses what is not allowed, hands the extension the rpIds it allows, and
+ * records one audit line per ceremony.
+ */
+describe('browser_passkey with source "1password" (INFRA-374)', () => {
+  const signedIn = {
+    clicked: 'e7',
+    passkey: {
+      mode: 'use', host: 'accounts.google.com', ceremony: 'completed', passkeys: [],
+      source: '1password', rpId: 'google.com', landedOn: 'https://admin.google.com/',
+      // Canary: whatever the extension answers, none of this belongs in the log line.
+      privateKey: 'CANARIO-PKCS8', userHandle: 'CANARIO-HANDLE',
+    },
+  };
+
+  beforeEach(() => { process.env.AGENT_BROWSER_1P_PASSKEY_RPIDS = 'google.com, shopify.com'; });
+  afterEach(() => { delete process.env.AGENT_BROWSER_1P_PASSKEY_RPIDS; });
+
+  it('refuses enroll before anything reaches the extension', async () => {
+    const { context, sent } = fakeContext(signedIn);
+    const r = await tool.handle(context, { ref: 'e7', mode: 'enroll', source: '1password' });
+    expect(sent).toEqual([]);
+    expect(isError(r)).toBe(true);
+    expect(text(r)).toContain('PASSKEY_1PASSWORD_ENROLL_REFUSED');
+  });
+
+  it('is off when the server lists no rpId', async () => {
+    delete process.env.AGENT_BROWSER_1P_PASSKEY_RPIDS;
+    const { context, sent } = fakeContext(signedIn);
+    const r = await tool.handle(context, { ref: 'e7', mode: 'use', source: '1password' });
+    expect(sent).toEqual([]);
+    expect(isError(r)).toBe(true);
+    expect(text(r)).toContain('PASSKEY_1PASSWORD_DISABLED');
+  });
+
+  it('forwards source and the allowed rpIds, and reports the sign-in', async () => {
+    const { context, sent } = fakeContext(signedIn);
+    const r = await tool.handle(context, { ref: 'e7', mode: 'use', source: '1password' });
+    expect(sent).toEqual([{
+      type: 'browser_passkey',
+      payload: { ref: 'e7', selector: undefined, mode: 'use', source: '1password', rpIds: ['google.com', 'shopify.com'] },
+    }]);
+    expect(isError(r)).toBe(false);
+    expect(text(r)).toBe('Clicked on e7. Signed in with the 1Password passkey for google.com on accounts.google.com; the page moved on to https://admin.google.com/.');
+  });
+
+  it('a timeout of a 1Password ceremony does not talk about the agent vault', async () => {
+    const { context } = fakeContext({
+      clicked: 'e7',
+      passkey: { mode: 'use', host: 'accounts.google.com', ceremony: 'timeout', passkeys: [], source: '1password', rpId: 'google.com' },
+    });
+    const r = await tool.handle(context, { ref: 'e7', mode: 'use', source: '1password' });
+    expect(text(r)).toContain('the page never moved');
+    expect(text(r)).not.toContain('passkeys for this host');
+  });
+
+  it('logs one line per ceremony, without key material', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { context } = fakeContext(signedIn);
+    await tool.handle(context, { ref: 'e7', mode: 'use', source: '1password' });
+    const line = logged.mock.calls.map((c) => String(c[0])).find((l) => l.includes('[passkey]'));
+    expect(line).toBeDefined();
+    expect(line).toContain('host=accounts.google.com');
+    expect(line).toContain('rpId=google.com');
+    expect(line).toContain('mode=use');
+    expect(line).toContain('source=1password');
+    expect(line).toContain('result=completed');
+    expect(line).toContain('landedOn=https://admin.google.com/');
+    expect(line).not.toContain('CANARIO');
+    logged.mockRestore();
+  });
+
+  it('agent stays agent: no rpIds leave the server and the report is the old one', async () => {
+    const { context, sent } = fakeContext(shopify());
+    await tool.handle(context, { ref: 'e3', mode: 'use' });
+    expect(sent[0].payload.rpIds).toEqual([]);
+    expect(sent[0].payload.source).toBe('agent');
   });
 });

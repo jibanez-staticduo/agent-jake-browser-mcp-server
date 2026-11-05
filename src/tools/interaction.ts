@@ -433,8 +433,28 @@ export function opEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
  * unlocks through the desktop app, or one that picks the backend itself).
  */
 export async function readSecret(ref: string): Promise<string> {
+  if (ref.startsWith(OP_PERSONAL)) return readPersonalSecret(ref);
   const bin = process.env.AGENT_BROWSER_OP_BIN || 'op';
   const { stdout } = await promisify(execFile)(bin, ['read', ref], { timeout: 60000, env: opEnv() });
+  return stdout.replace(/\r?\n$/, '');
+}
+
+const OP_PERSONAL = 'op-personal://';
+
+/**
+ * `op-personal://vault/item/field`: Dani's personal vaults through op-mcp-personal on his Mac (SC-1652).
+ * Runs `AGENT_BROWSER_OPP_BIN [AGENT_BROWSER_OPP_ARGS…] resolve-for-fill op://vault/item/field`, without a
+ * shell; the value comes back on stdout. In production the binary is `bridge/op-mcp-ssh` with
+ * `--client agent-jake`: the Mac decides vaults, Telegram grant and log; this side only carries the value
+ * to the field. The timeout covers a Touch ID prompt (op-mcp-personal gives up at 45 s). Unset bin: error,
+ * never a fallback to `op`.
+ */
+async function readPersonalSecret(ref: string): Promise<string> {
+  const bin = process.env.AGENT_BROWSER_OPP_BIN;
+  if (!bin) throw new Error('AGENT_BROWSER_OPP_BIN is not set');
+  const fixed = (process.env.AGENT_BROWSER_OPP_ARGS ?? '').split(' ').filter(Boolean);
+  const opRef = `op://${ref.slice(OP_PERSONAL.length)}`;
+  const { stdout } = await promisify(execFile)(bin, [...fixed, 'resolve-for-fill', opRef], { timeout: 60000 });
   return stdout.replace(/\r?\n$/, '');
 }
 
@@ -445,15 +465,15 @@ export async function readSecret(ref: string): Promise<string> {
  */
 const fillSecret = createTool({
   name: 'browser_fill_secret',
-  description: 'Type a secret from 1Password (op://vault/item/field) into a field. The value is read on the server and omitted from this tool result. Requires a secret-aware extension that redacts request and response logs. Use it for passwords AND for 2FA/TOTP codes, never browser_type. TOTP: reference the OTP field of the item BY ITS FIELD ID with ?attribute=otp (op://vault/item/TOTP_xxxx?attribute=otp) and it types the current code; the field label changes with the app language. Without ?attribute=otp it would type the otpauth:// seed.',
+  description: 'Type a secret from 1Password (op://vault/item/field) into a field. The value is read on the server and omitted from this tool result. Requires a secret-aware extension that redacts request and response logs. Use it for passwords AND for 2FA/TOTP codes, never browser_type. TOTP: reference the OTP field of the item BY ITS FIELD ID with ?attribute=otp (op://vault/item/TOTP_xxxx?attribute=otp) and it types the current code; the field label changes with the app language. Without ?attribute=otp it would type the otpauth:// seed. Dani\'s personal vaults (llavero, Skirmshop, Private) use op-personal://vault/item/field: the first one of the day asks Dani on Telegram, so an error may mean the grant is pending.',
   schema: z.object({
     ref: z.string().optional().describe('Element reference from browser_state/snapshot'),
     selector: z.string().optional().describe('CSS selector to find the element'),
     secretRef: z.string()
-      .regex(/^op:\/\/[^/?#]+\/[^/?#]+\/(?:[^/?#]+\/)?[^/?#]+(?:\?[^#]+)?$/, 'secretRef must be a complete op://vault/item/field reference')
+      .regex(/^op(?:-personal)?:\/\/[^/?#]+\/[^/?#]+\/(?:[^/?#]+\/)?[^/?#]+(?:\?[^#]+)?$/, 'secretRef must be a complete op://vault/item/field or op-personal://vault/item/field reference')
       .regex(/^[^\x00-\x1f\x7f]+$/, 'secretRef must not contain control characters')
-      .refine(ref => ref.slice(5).split('?')[0].split('/').every(part => part.trim().length > 0), 'secretRef components must not be blank')
-      .describe('1Password secret reference, op://vault/item/field. TOTP code: op://vault/item/<OTP field id>?attribute=otp'),
+      .refine(ref => ref.slice(ref.indexOf('://') + 3).split('?')[0].split('/').every(part => part.trim().length > 0), 'secretRef components must not be blank')
+      .describe('1Password secret reference, op://vault/item/field or op-personal://vault/item/field. TOTP code: op://vault/item/<OTP field id>?attribute=otp'),
     clear: z.boolean().optional().default(true).describe('Clear existing text before typing'),
   }).refine(
     data => data.ref || data.selector,
@@ -615,37 +635,63 @@ export const saveSecretTool: Tool = {
 };
 
 /**
+ * The rpIds allowed for `source: "1password"` (INFRA-374), from AGENT_BROWSER_1P_PASSKEY_RPIDS
+ * (comma separated). Empty means the feature is off: production carries `google.com,shopify.com`,
+ * and adding a site there is Security's call, not a client's.
+ */
+export function onePasswordPasskeyRpIds(): string[] {
+  return (process.env.AGENT_BROWSER_1P_PASSKEY_RPIDS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+/**
  * browser_passkey (INFRA-585): clicks the element that starts a passkey ceremony. The extension
  * lifts its WebAuthn guard for that ceremony only, with the agent's own passkey for the tab
  * host (use) or creating one (enroll), and keeps the key in the browser: nothing here ever sees it.
+ * INFRA-374 adds `source: "1password"`: the same click, with a passkey of Dani's 1Password signing
+ * it in the page. Only "use", only the allowed rpIds, and the key never comes back either.
  */
 export const passkeyTool: Tool = createTool({
   name: 'browser_passkey',
-  description: 'Sign in to a site with a passkey, or give the agent a passkey for it. Agent tabs refuse every WebAuthn request; this clicks the element that starts ONE passkey ceremony and lifts that refusal only while it lasts. mode "use": click the site\'s "sign in with passkey" button and the agent\'s own passkey for that host signs in. mode "enroll": signed in, click the site\'s "add a passkey" button and the site creates the agent\'s passkey for that host (once per site). The key stays in the browser extension and never reaches this result. Waits up to 20 s for the site to ask.',
+  description: 'Sign in to a site with a passkey, or give the agent a passkey for it. Agent tabs refuse every WebAuthn request; this clicks the element that starts ONE passkey ceremony and lifts that refusal only while it lasts. mode "use": click the site\'s "sign in with passkey" button and the agent\'s own passkey for that host signs in. mode "enroll": signed in, click the site\'s "add a passkey" button and the site creates the agent\'s passkey for that host (once per site). The key stays in the browser extension and never reaches this result. Waits up to 20 s for the site to ask. source "1password" (default "agent"): the passkey of the 1Password in this browser signs in instead — mode "use" only, only for the sites this server allows, and the tab reloads around the ceremony.',
   schema: z.object({
     ref: z.string().optional().describe('Element reference from browser_state/snapshot of the button that starts the passkey ceremony'),
     selector: z.string().optional().describe('CSS selector of that button'),
-    mode: z.enum(['enroll', 'use']).describe('"use" signs in with the agent passkey enrolled for the tab host; "enroll" creates it (the site must be signed in)'),
+    mode: z.enum(['enroll', 'use']).describe('"use" signs in with the passkey enrolled for the tab host; "enroll" creates it (the site must be signed in)'),
+    source: z.enum(['agent', '1password']).default('agent').describe('"agent" (default): the agent\'s own passkey vault in the extension, enroll allowed. "1password": a passkey of this browser\'s 1Password signs in — mode "use" only, and only on the sites this server lists'),
   }).refine(
     data => data.ref || data.selector,
     { message: 'Either ref or selector must be provided' }
   ),
   async handle(context, params) {
+    const rpIds = params.source === '1password' ? onePasswordPasskeyRpIds() : [];
+    if (params.source === '1password') {
+      if (params.mode === 'enroll') {
+        return errorResult('PASSKEY_1PASSWORD_ENROLL_REFUSED: 1Password passkeys are Dani\'s vault and the agent only signs in with them (mode "use"). To enroll a passkey of the agent itself, use source "agent".');
+      }
+      if (!rpIds.length) {
+        return errorResult('PASSKEY_1PASSWORD_DISABLED: this server allows no site for 1Password passkeys (AGENT_BROWSER_1P_PASSKEY_RPIDS is empty). Use source "agent", or ask for the rpIds to be set.');
+      }
+    }
     const response = await context.send('browser_passkey', {
       ref: params.ref,
       selector: params.selector,
       mode: params.mode,
+      source: params.source,
+      rpIds,
     });
     if (!response.success) {
       const message = response.error?.message ?? 'Passkey click failed';
+      logPasskeyCeremony(params.mode, params.source, undefined, 'error');
       return errorResult(/Unknown tool/.test(message)
         ? 'The browser extension does not know browser_passkey yet: it updates itself (or reload it), then try again.'
         : message);
     }
     const passkey = (response.result as { passkey?: PasskeyOutcome } | undefined)?.passkey;
     if (!passkey) {
+      logPasskeyCeremony(params.mode, params.source, undefined, 'no-report');
       return errorResult('The browser extension answered without a passkey report: it is too old for browser_passkey. Nothing was signed.');
     }
+    logPasskeyCeremony(params.mode, params.source, passkey, passkey.ceremony);
     const report = `Clicked on ${params.ref ?? params.selector}. ${describePasskey(passkey)}`;
     if (passkey.guardRestored === false) {
       return errorResult(`${report} The WebAuthn guard could not be put back on this tab: close it (browser_close_tab) before visiting any other site.`);
@@ -661,10 +707,38 @@ interface PasskeyOutcome {
   ceremony: 'completed' | 'timeout';
   passkeys: Array<{ rpId: string; enrolledAt: string }>;
   guardRestored?: false;
+  /** Only for a 1Password ceremony (INFRA-374), whose key the extension never holds. */
+  source?: 'agent' | '1password';
+  rpId?: string;
+  /** Only for a 1Password ceremony: where the tab ended up, without query or fragment. */
+  landedOn?: string;
+}
+
+/**
+ * One audit line per ceremony (INFRA-374): host, rpId, mode, source, result and where the page
+ * landed. The time is the logger's own stamp. Never key material, never a user handle — the
+ * extension reports neither, and the landing URL comes without query or fragment.
+ */
+function logPasskeyCeremony(
+  mode: 'enroll' | 'use',
+  source: 'agent' | '1password',
+  passkey: PasskeyOutcome | undefined,
+  result: string,
+): void {
+  const rp = passkey ? (passkey.source === '1password' ? passkey.rpId ?? '-' : passkey.passkeys.map((k) => k.rpId).join('|') || '-') : '-';
+  const landed = passkey?.landedOn ? ` landedOn=${passkey.landedOn}` : '';
+  logger.info(`[passkey] host=${passkey?.host ?? '-'} rpId=${rp} mode=${mode} source=${source} result=${result}${landed}`);
 }
 
 export function describePasskey(p: PasskeyOutcome): string {
   const which = p.passkeys.map((k) => k.rpId).join(', ') || 'none';
+  if (p.source === '1password') {
+    // The agent's vault has nothing to do with this: it lists no passkey of a 1Password ceremony.
+    if (p.ceremony === 'timeout') {
+      return `1Password signed no one in on ${p.host}: the page never moved (1Password locked, or no passkey for this site).`;
+    }
+    return `Signed in with the 1Password passkey for ${p.rpId ?? p.host} on ${p.host}; the page moved on to ${p.landedOn ?? 'the site'}.`;
+  }
   if (p.ceremony === 'timeout') {
     return `Passkey ${p.mode} on ${p.host}: the site asked for no passkey within the wait (passkeys for this host: ${which}).`;
   }

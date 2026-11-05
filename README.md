@@ -127,16 +127,19 @@ also works while nothing is connected.
 | `BROWSER_PUBLIC_WS_URL` | derived | Full `ws(s)://host/path` handed to the extension. Use it when the proxy mapping is not derivable from the request. |
 | `BROWSER_WS_PATH` | `/` | Path advertised to the extension, for proxies that map the socket to a subpath. |
 | `MCP_HTTP_HOST` / `MCP_HTTP_PORT` | `127.0.0.1` / `8000` | MCP streamable HTTP endpoint. |
-| `BROWSER_PUBLIC_ORIGIN` | derived | Origin used to build the approval link returned by `/pair/start`. Set it when the proxy host is not derivable from the request. |
+| `BROWSER_PUBLIC_ORIGIN` | derived | Origin used to build the approval link returned by `/pair/start` and the one baked into `/install`. Set it when the proxy host is not derivable from the request. |
 | `AGENT_BROWSER_OUT_DIR` | system temp dir | Where `browser_pdf` and tool results saved with `filename` write their files. |
 | `AGENT_BROWSER_DROP_DIR` | unset (file drops disabled) | Directory of files available to `browser_drop`. Files must be direct children, with no symlinks; maximum 8 files and 10 MiB total per call. Mount only files intended for browser upload. MIME data-only drops remain available with a 1 MiB limit. |
 | `AGENT_BROWSER_ALLOW_UNSAFE_CODE` | unset (disabled) | Set exactly `1` to enable `browser_run_code_unsafe`, which executes arbitrary JavaScript in the MCP server process. Only use it with fully trusted MCP clients. |
 | `AGENT_BROWSER_CONNECTION_LABELS` | unset | JSON map of `connectionId` to a friendly name (e.g. `{"259bc…":"mac"}`), so an MCP session can pick a paired browser by `id` or `name` instead of the global most-recently-used. |
 | `AGENT_BROWSER_DEFAULT_CONNECTION` | unset (most recently used) | Connection `id` or `name` used when a session has not chosen one. |
 | `AGENT_BROWSER_OP_BIN` | `op` | Reader binary for `browser_fill_secret`, invoked as `<bin> read <op://ref>` on the server machine to pull a 1Password secret without it crossing the transcript. |
+| `AGENT_BROWSER_OPP_BIN` | unset (`op-personal://` refused) | Reader for `op-personal://vault/item/field` in `browser_fill_secret`: invoked without a shell as `<bin> [AGENT_BROWSER_OPP_ARGS…] resolve-for-fill op://vault/item/field`, value on stdout. In production, `bridge/op-mcp-ssh` of `pocharlies-org/op-mcp-personal` (see below). Never falls back to `op`. |
+| `AGENT_BROWSER_OPP_ARGS` | empty | Fixed leading arguments for `AGENT_BROWSER_OPP_BIN`, space-separated (`--client agent-jake`). |
 | `OP_CONNECT_HOST` | unset | HTTP(S) origin of a 1Password Connect server (`http://host:8080`), without credentials, path, query or fragment. The `op` wrapper of the pod uses it for `browser_fill_secret`, and `browser_save_secret` writes through it. |
 | `OP_CONNECT_WRITE_TOKEN` | unset | Connect token WITH write access, separate from the read-only `OP_CONNECT_TOKEN`. Without it `browser_save_secret` answers `SAVE_SECRET_NOT_CONFIGURED`. Seed it with `tr -d '\n'`. |
 | `AGENT_BROWSER_SAVE_VAULTS` | unset | Comma-separated 26-character vault IDs `browser_save_secret` may write to (the in-pod wall behind the token's own scope). Empty means `SAVE_SECRET_NOT_CONFIGURED`. |
+| `AGENT_BROWSER_1P_PASSKEY_RPIDS` | unset (feature off) | Comma-separated rpIds `browser_passkey` with `source: "1password"` may sign in to: the tab host must be one of them or a subdomain of one (`accounts.google.com` for `google.com`; `myshopify.com` is not `shopify.com`). Empty means `PASSKEY_1PASSWORD_DISABLED`. Production carries `google.com,shopify.com`; adding a site is Security's call (INFRA-1171). |
 
 PDFs and network or console results written with a path must be direct children of
 `AGENT_BROWSER_OUT_DIR` (or the system temp directory by default). Existing files
@@ -157,7 +160,8 @@ can also carry private data, so use these tools only with trusted MCP clients.
 | Route | Purpose |
 | --- | --- |
 | `POST /mcp` (plus `GET`/`DELETE`) | MCP streamable HTTP endpoint. |
-| `GET /` | Small page with the download link, the pairing link and the live connection list. |
+| `GET /` | Small page with the install command, the download link, the pairing link and the live connection list. |
+| `GET /install` | Installer for `curl -fsSL <origin>/install \| bash`: puts `/download` in `~/Downloads/agent-jake-browser` (the self-updating folder), opens `chrome://extensions` and the folder on macOS, and prints Chrome's two manual steps (developer mode, load the folder) plus pairing. `400` when the origin is not a plain http(s) origin. |
 | `GET /download` | Serves the extension zip (`BROWSER_EXTENSION_ZIP`, else the published one). |
 | `GET /download/latest.json` | The newest published extension build (`version`, `build`, `sha`, `publishedAt`); 404 when none. Installed extensions check it at startup and every 30 min. |
 | `GET /connections` | JSON: auth status, derived wsUrl and the current connections. |
@@ -220,6 +224,7 @@ ever written into the archive — authentication comes from pairing.
 | `browser_get_attribute` | Get an attribute value from an element |
 | `browser_is_visible` | Check if an element is visible |
 | `browser_wait_for_element` | Wait for an element to appear |
+| `browser_get_cookies` | Read the tab's cookies via CDP `Storage.getCookies` (HttpOnly included; values are secrets — for scripts, not chat) |
 | `browser_highlight` | Highlight an element for debugging |
 
 ### Tab Management (5 tools)
@@ -244,7 +249,7 @@ ever written into the archive — authentication comes from pairing.
 
 | Tool | Description |
 |------|-------------|
-| `browser_fill_secret` | Read an `op://` reference on the server machine and type it into a field; the value never appears in arguments, results or logs |
+| `browser_fill_secret` | Read an `op://` (or `op-personal://`) reference on the server machine and type it into a field; the value never appears in arguments, results or logs |
 | `browser_save_secret` | Copy a value shown on the page (a TOTP seed, an API token) into a field of a 1Password item: `ref`/`selector`/`regex` pick it, `destination: {vault, item, field}` receives it, `type` is `concealed` (default) or `otp`, `template` wraps it, `overwrite` (default false) replaces a field that already has a value |
 
 `browser_save_secret` asks the extension for the value through the internal message
@@ -354,6 +359,24 @@ src/
 ## License
 
 MIT - See [LICENSE](LICENSE)
+
+### `op-personal://` (SC-1652)
+
+`browser_fill_secret` also takes `secretRef: op-personal://vault/item/field` for Dani's personal 1Password
+vaults, served by `op-mcp-personal` on his Mac (Touch ID, a Telegram grant valid for 24 h, a log line per access
+with no values). The server runs `AGENT_BROWSER_OPP_BIN`, which on the x86 is
+
+```sh
+AGENT_BROWSER_OPP_BIN=$HOME/src/op-mcp-personal/bridge/op-mcp-ssh
+AGENT_BROWSER_OPP_ARGS="--client agent-jake"
+# → op-mcp-ssh --client agent-jake resolve-for-fill op://vault/item/field
+```
+
+The Mac decides everything else: allowed vaults (`llavero`, `Skirmshop`, `Private`; Security Rev. 3 in
+`policy.json`), complete references only, and the `agent-jake` SSH key, which never leaves the x86. That is why
+this reader only exists in a server instance on the x86 and never in the pod. The value goes to the field with
+the same redaction as `op://`. The agent gets only `Filled and verified the target field.` or a fixed error,
+never the bridge's output. Passkeys stay with `browser_passkey` (WebAuthn in the browser).
 
 ### StaticDuo runtime safety
 
