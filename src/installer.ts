@@ -68,9 +68,11 @@ mv -- "$stage" "$DEST"
 echo "Extension verificada instalada en $DEST. Carga la carpeta desde chrome://extensions."
 `;
 
-export function installerScript(origin: string, wsUrl: string): string | null {
+export function installerScript(origin: string, wsUrl: string, options: { publicKeyDerB64?: string } = {}): string | null {
   if (!ORIGIN_RE.test(origin) || !WS_RE.test(wsUrl)) return null;
-  return SCRIPT.replace('__ORIGIN__', origin).replace('__WS_URL__', wsUrl).replace('__PUBKEY__', PUBLIC_KEY_DER_B64);
+  const publicKey = options.publicKeyDerB64 ?? PUBLIC_KEY_DER_B64;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(publicKey)) return null;
+  return SCRIPT.replace('__ORIGIN__', origin).replace('__WS_URL__', wsUrl).replace('__PUBKEY__', publicKey);
 }
 
 export const installerPublicKey = PUBLIC_KEY_DER_B64;
