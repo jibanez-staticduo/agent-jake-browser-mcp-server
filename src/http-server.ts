@@ -341,14 +341,14 @@ for (const name of ['update-files.json', 'update-files.sig']) {
   });
 }
 
-app.get('/download', async (_req, res) => {
+app.get('/download', async (req, res) => {
   if (INSTALL_INSTANCE_RAW && !INSTALL_INSTANCE_VALUES.has(INSTALL_INSTANCE_RAW)) {
     return res.status(500).type('text/plain; charset=utf-8').send('AGENT_BROWSER_INSTALL_INSTANCE invalido.\n');
   }
   const EXTENSION_ZIP = extensionZipPath(process.env, EXTENSION_DIR);
   try {
     const info = await stat(EXTENSION_ZIP);
-    const wsUrl = (process.env.BROWSER_PUBLIC_WS_URL || '').trim();
+    const wsUrl = (process.env.BROWSER_PUBLIC_WS_URL || '').trim() || (INSTALL_INSTANCE ? publicWsUrl(req) : '');
 
     res.setHeader('Cache-Control', 'public, max-age=60');
     res.setHeader('Content-Type', 'application/zip');

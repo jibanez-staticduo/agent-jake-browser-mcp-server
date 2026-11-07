@@ -581,6 +581,26 @@ describe('download with BROWSER_PUBLIC_WS_URL', () => {
     }
   });
 
+  it('derives the WS URL for an instance when no explicit public WS URL is configured', async () => {
+    const server = await startServer({
+      httpPort: dlHttpPort + 50,
+      wsPort: dlWsPort + 50,
+      zipPath: dlZipFile,
+      tokenStore: join(tempDir, 'derived-instance-tokens.json'),
+      installInstance: 'nas',
+    });
+    const download = await request(server, 'GET', '/download', {
+      headers: { 'x-forwarded-proto': 'https', 'x-forwarded-host': 'nas.example.test' },
+    });
+    expect(download.status).toBe(200);
+    expect(JSON.parse(configInZip(download.buffer).content)).toEqual({
+      version: 1,
+      wsUrl: 'wss://nas.example.test/',
+      installInstance: 'nas',
+    });
+    server.child.kill('SIGKILL');
+  });
+
   it('caches the patched archive across requests', async () => {
     const first = await request(downloader, 'GET', '/download');
     const second = await request(downloader, 'GET', '/download');
