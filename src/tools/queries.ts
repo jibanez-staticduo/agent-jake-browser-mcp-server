@@ -3,6 +3,7 @@
  */
 import { z } from 'zod';
 import { createTool, textResult, errorResult } from './types.js';
+import { FILENAME_FIELD, MAX_CHARS_FIELD, outputResult } from './utility.js';
 import type { Tool } from '../types.js';
 
 /**
@@ -10,10 +11,12 @@ import type { Tool } from '../types.js';
  */
 export const getTextTool: Tool = createTool({
   name: 'browser_get_text',
-  description: 'Get the text content of an element.',
+  description: 'Get the text content of an element. Inline text is capped at 200000 chars: pass filename for all of it, or maxChars to choose.',
   schema: z.object({
     ref: z.string().optional().describe('Element reference from snapshot'),
     selector: z.string().optional().describe('CSS selector for the element'),
+    filename: FILENAME_FIELD,
+    maxChars: MAX_CHARS_FIELD,
   }).refine(
     data => data.ref || data.selector,
     { message: 'Either ref or selector must be provided' }
@@ -32,7 +35,7 @@ export const getTextTool: Tool = createTool({
 
     const rawText = response.result as string | { text?: string };
     const text = typeof rawText === 'string' ? rawText : rawText.text;
-    return textResult(text || '(empty)');
+    return outputResult(text || '(empty)', params.filename, params.maxChars);
   },
 });
 
