@@ -9,9 +9,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { WebSocket } from 'ws';
-import { createWSServer, type WSServer } from '../src/ws-server.js';
+import {
+  createWSServer,
+  WS_DEFAULT_TIMEOUT_MS,
+  WS_MESSAGE_TIMEOUT_MS,
+  wsTimeoutFor,
+  type WSServer,
+} from '../src/ws-server.js';
 import { createTokenStore } from '../src/token-store.js';
 import type { ExtensionMessage } from '../src/types.js';
+import { queryTools } from '../src/tools/queries.ts';
+import { tabTools } from '../src/tools/tabs.ts';
+import { utilityTools } from '../src/tools/utility.ts';
 
 interface FakeExtension {
   socket: WebSocket;
@@ -261,5 +270,55 @@ describe('handshake auth', () => {
     });
     const client = await connect(await serverPort(server!), { connectionId: 'chrome-a' });
     expect(client.socket.readyState).toBe(WebSocket.OPEN);
+  });
+});
+
+/**
+ * The answer window is per command: a 30 s `browser_wait` used to expire at the same 30 s the
+ * server was waiting, so a wait that finished correctly was reported as a timeout.
+ */
+describe('answer window per command', () => {
+  beforeEach(() => {
+    server = createWSServer({
+      port: 0,
+      host: '127.0.0.1',
+      tokenStore: createTokenStore(join(tempDir, 'tokens.json')),
+    });
+  });
+
+  it('gives up on a command that never answers and says which one', async () => {
+    const port = await serverPort(server!);
+    const extension = await connect(port, { connectionId: 'chrome-a' }, false);
+
+    await expect(server!.sendTo('chrome-a', message('browser_navigate'), 40)).rejects.toThrow(
+      'Request timed out: browser_navigate',
+    );
+    expect(extension.messages).toHaveLength(1);
+  });
+
+  it('outlives the wait each command is allowed to ask for', async () => {
+    // The longest wait each tool accepts, read from what it advertises rather than from this file.
+    const maxima = new Map<string, number>();
+    for (const tool of [...utilityTools, ...queryTools, ...tabTools]) {
+      const properties = (tool.schema.inputSchema as any).properties ?? {};
+      for (const field of ['ms', 'timeout']) {
+        const maximum = properties[field]?.maximum;
+        if (typeof maximum === 'number') {
+          maxima.set(tool.schema.name, Math.max(maxima.get(tool.schema.name) ?? 0, maximum));
+        }
+      }
+    }
+    expect(maxima.get('browser_wait')).toBe(30_000);
+    expect(maxima.get('browser_wait_for_element')).toBe(30_000);
+    expect(maxima.get('browser_iframe_click')).toBe(30_000);
+
+    for (const [type, timeoutMs] of Object.entries(WS_MESSAGE_TIMEOUT_MS)) {
+      // Room to answer, and never a wait a caller could not distinguish from a hung browser.
+      expect(timeoutMs, type).toBeGreaterThan(maxima.get(type) ?? WS_DEFAULT_TIMEOUT_MS);
+      expect(timeoutMs, type).toBeLessThan(60_000);
+    }
+
+    expect(wsTimeoutFor('browser_wait')).toBe(WS_MESSAGE_TIMEOUT_MS.browser_wait);
+    expect(wsTimeoutFor('browser_navigate')).toBe(WS_DEFAULT_TIMEOUT_MS);
   });
 });
