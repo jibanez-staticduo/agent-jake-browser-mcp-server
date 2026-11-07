@@ -13,6 +13,7 @@ export const stateTool: Tool = createTool({
   schema: z.object({
     max: z.number().optional().describe('Maximum elements to list (default 150)'),
   }),
+  annotations: { readOnlyHint: true, idempotentHint: true },
   async handle(context, params) {
     const response = await context.send('browser_state', { max: params.max });
     if (!response.success) {
@@ -30,6 +31,7 @@ export const findTool: Tool = createTool({
   schema: z.object({
     text: z.string().describe('Text to search for in the element name or href'),
   }),
+  annotations: { readOnlyHint: true, idempotentHint: true },
   async handle(context, params) {
     const response = await context.send('browser_find', { text: params.text });
     if (!response.success) {

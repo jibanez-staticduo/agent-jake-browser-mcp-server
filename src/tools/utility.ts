@@ -27,6 +27,7 @@ export const waitTool: Tool = createTool({
   schema: z.object({
     ms: z.number().min(0).max(30000).describe('Milliseconds to wait (max 30 seconds)'),
   }),
+  annotations: { readOnlyHint: true, idempotentHint: true },
   async handle(context, params) {
     const response = await context.send('browser_wait', { time: params.ms / 1000 });
 
@@ -61,6 +62,7 @@ export const screenshotTool: Tool = createTool({
       .default(80)
       .describe('JPEG quality (0-100)'),
   }),
+  annotations: { readOnlyHint: true },
   async handle(context, params) {
     const response = await context.send('browser_screenshot', {
       ref: params.ref,
@@ -218,6 +220,7 @@ export const networkRequestsTool: Tool = createTool({
     filter: z.string().optional().describe('Case-insensitive regex on the URL'),
     filename: z.string().optional().describe('Write the output to this file instead of returning it'),
   }),
+  annotations: { readOnlyHint: true },
   async handle(context, params) {
     const response = await context.send('browser_network_requests', {
       includeStatic: params.includeStatic,
@@ -253,6 +256,7 @@ export const networkRequestTool: Tool = createTool({
     maxBodyChars: z.number().int().min(100).optional().default(20000).describe('Truncate bodies to this length'),
     filename: z.string().optional().describe('Write the output to this file instead of returning it'),
   }),
+  annotations: { readOnlyHint: true },
   async handle(context, params) {
     const response = await context.send('browser_network_request', {
       index: params.index,
@@ -294,6 +298,7 @@ export const runCodeUnsafeTool: Tool = createTool({
     code: z.string().describe('`async (page) => { ... }` or a function body'),
     filename: z.string().optional().describe('Write the output to this file instead of returning it'),
   }),
+  annotations: { destructiveHint: true },
   async handle(context, params) {
     if (process.env.AGENT_BROWSER_ALLOW_UNSAFE_CODE !== '1') {
       return errorResult('browser_run_code_unsafe is disabled: start the server with AGENT_BROWSER_ALLOW_UNSAFE_CODE=1 to allow it');
@@ -381,6 +386,7 @@ export const getHtmlTool: Tool = createTool({
   name: 'browser_get_html',
   description: 'Get the full HTML of the current page using CDP DOM.getOuterHTML. CSP-safe - works on sites that block eval.',
   schema: z.object({}),
+  annotations: { readOnlyHint: true },
   async handle(context) {
     const response = await context.send('browser_get_html', {});
 
@@ -466,6 +472,7 @@ export const pdfTool: Tool = createTool({
     scale: z.number().min(0.1).max(2).optional().default(1).describe('Print scale (0.1 to 2)'),
     pageRanges: z.string().optional().describe('Pages to include, e.g. "1-3" or "1,3"'),
   }),
+  annotations: { readOnlyHint: true },
   async handle(context, params) {
     const response = await context.send('browser_pdf', {
       landscape: params.landscape,

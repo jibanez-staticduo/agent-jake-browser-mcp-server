@@ -19,6 +19,7 @@ export const getTextTool: Tool = createTool({
     { message: 'Either ref or selector must be provided' }
   ),
   requiredAnyOf: [['ref', 'selector']],
+  annotations: { readOnlyHint: true, idempotentHint: true },
   async handle(context, params) {
     const response = await context.send('browser_get_text', {
       ref: params.ref,
@@ -50,6 +51,7 @@ export const getAttributeTool: Tool = createTool({
     { message: 'Either ref or selector must be provided' }
   ),
   requiredAnyOf: [['ref', 'selector']],
+  annotations: { readOnlyHint: true, idempotentHint: true },
   async handle(context, params) {
     const response = await context.send('browser_get_attribute', {
       ref: params.ref,
@@ -81,6 +83,7 @@ export const isVisibleTool: Tool = createTool({
     { message: 'Either ref or selector must be provided' }
   ),
   requiredAnyOf: [['ref', 'selector']],
+  annotations: { readOnlyHint: true, idempotentHint: true },
   async handle(context, params) {
     const response = await context.send('browser_is_visible', {
       ref: params.ref,
@@ -115,6 +118,7 @@ export const waitForElementTool: Tool = createTool({
       .default('visible')
       .describe('State to wait for'),
   }),
+  annotations: { readOnlyHint: true, idempotentHint: true },
   async handle(context, params) {
     const response = await context.send('browser_wait_for_element', {
       selector: params.selector,
@@ -185,6 +189,7 @@ export const getCookiesTool: Tool = createTool({
       }), 'urls must contain absolute http(s) URLs')
       .describe('Filter: only cookies that would be sent to these URLs (CDP urls param)'),
   }),
+  annotations: { readOnlyHint: true, idempotentHint: true },
   async handle(context, params) {
     if (process.env.AGENT_BROWSER_GET_COOKIES_ENABLED !== 'true') return errorResult('Cookie reading is disabled on this server.');
     const location = await context.send('browser_evaluate', { code: 'location.href' });

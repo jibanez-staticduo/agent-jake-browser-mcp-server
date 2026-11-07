@@ -7,14 +7,28 @@
  * alternative is a field the schema really declares.
  */
 import { describe, expect, it } from 'vitest';
-import { navigationTools } from '../src/tools/navigation.ts';
+import { connectionsTools } from '../src/tools/connections.ts';
 import { interactionTools } from '../src/tools/interaction.ts';
+import { navigationTools } from '../src/tools/navigation.ts';
 import { queryTools } from '../src/tools/queries.ts';
+import { snapshotTools } from '../src/tools/snapshot.ts';
+import { stateTools } from '../src/tools/state.ts';
+import { tabTools } from '../src/tools/tabs.ts';
+import { utilityTools } from '../src/tools/utility.ts';
 
 // The tool sets, not `getAllTools()`: save_secret is only registered when the Connect write
 // token is configured, and this contract holds whether or not it is.
 const tools = new Map(
-  [...navigationTools, ...interactionTools, ...queryTools].map((tool) => [tool.schema.name, tool]),
+  [
+    ...navigationTools,
+    ...stateTools,
+    ...snapshotTools,
+    ...interactionTools,
+    ...utilityTools,
+    ...tabTools,
+    ...queryTools,
+    ...connectionsTools,
+  ].map((tool) => [tool.schema.name, tool]),
 );
 
 function schemaOf(name: string): any {
@@ -92,5 +106,51 @@ describe('required alternatives in the advertised schemas', () => {
     const result = await tool.handle({ send: async () => ({ id: '1', success: true, result: 'x' }) } as never, {});
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('ref or selector');
+  });
+});
+
+describe('annotations', () => {
+  /** What a client may assume before calling: read-only, destructive, repeatable, outside world. */
+  function annotationsOf(name: string): any {
+    const annotations = tools.get(name)!.schema.annotations;
+    expect(annotations, name).toBeDefined();
+    return annotations;
+  }
+
+  it.each([
+    'browser_state', 'browser_find', 'browser_snapshot', 'browser_get_text', 'browser_get_attribute',
+    'browser_is_visible', 'browser_wait_for_element', 'browser_get_cookies', 'browser_list_tabs',
+    'browser_find_tab', 'browser_list_connections', 'browser_wait',
+  ])('%s is a repeatable read', (name) => {
+    expect(annotationsOf(name)).toMatchObject({ readOnlyHint: true, idempotentHint: true });
+  });
+
+  it.each([
+    'browser_get_html', 'browser_screenshot', 'browser_pdf', 'browser_network_requests',
+    'browser_network_request',
+  ])('%s reads the page but may write its output, so a repeat is not a no-op', (name) => {
+    const annotations = annotationsOf(name);
+    expect(annotations.readOnlyHint).toBe(true);
+    expect(annotations.idempotentHint).toBeUndefined();
+  });
+
+  it.each(['browser_close_tab', 'browser_run_code_unsafe'])('%s is destructive', (name) => {
+    expect(annotationsOf(name).destructiveHint).toBe(true);
+  });
+
+  it('claims nothing about tools that change the page', () => {
+    for (const name of ['browser_click', 'browser_type', 'browser_navigate', 'browser_reload',
+      'browser_new_tab', 'browser_switch_tab', 'browser_drop', 'browser_highlight']) {
+      const annotations = annotationsOf(name);
+      expect(annotations.readOnlyHint, name).toBe(false);
+      expect(annotations.destructiveHint, name).toBe(false);
+    }
+  });
+
+  it('opens the world only for a tool that reaches a browser', () => {
+    for (const [name, tool] of tools) {
+      expect(tool.schema.annotations, name).toBeDefined();
+      expect(tool.schema.annotations?.openWorldHint, name).toBe(!tool.serverSide);
+    }
   });
 });

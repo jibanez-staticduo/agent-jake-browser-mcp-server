@@ -2,7 +2,7 @@
  * Tool type definitions and helpers.
  */
 import { z } from 'zod';
-import type { Context, Tool, ToolSchema, ToolResult, ContentItem } from '../types.js';
+import type { Context, Tool, ToolSchema, ToolResult, ContentItem, ToolAnnotations } from '../types.js';
 
 /**
  * Helper to create a tool from a Zod schema.
@@ -22,9 +22,15 @@ export function createTool<T extends z.ZodType>(options: {
    * Two or more groups are combined with `allOf`, one `anyOf` per group.
    */
   requiredAnyOf?: string[][];
+  /**
+   * MCP annotations. What is not given stays conservative: nothing is advertised as read-only
+   * or idempotent unless the tool truly is, and a browser tool is always open-world because it
+   * acts on a page outside this process.
+   */
+  annotations?: ToolAnnotations;
   handle: (context: Context, params: z.infer<T>) => Promise<ToolResult>;
 }): Tool {
-  const { name, description, schema, handle, serverSide, external, requiredAnyOf } = options;
+  const { name, description, schema, handle, serverSide, external, requiredAnyOf, annotations } = options;
 
   const inputSchema = z.toJSONSchema(schema, {
     io: 'input',
@@ -48,6 +54,12 @@ export function createTool<T extends z.ZodType>(options: {
     name,
     description,
     inputSchema,
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: !serverSide,
+      ...annotations,
+    },
   };
 
   return {
