@@ -16,6 +16,7 @@ export const snapshotTool: Tool = createTool({
       .optional()
       .describe('CSS selector to scope the snapshot to a specific element'),
   }),
+  annotations: { readOnlyHint: true, idempotentHint: true },
   async handle(context, params) {
     const response = await context.send('browser_snapshot', {
       selector: params.selector,

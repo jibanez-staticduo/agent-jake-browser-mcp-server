@@ -2,7 +2,7 @@
  * Tool type definitions and helpers.
  */
 import { z } from 'zod';
-import type { Context, Tool, ToolSchema, ToolResult, ContentItem } from '../types.js';
+import type { Context, Tool, ToolSchema, ToolResult, ContentItem, ToolAnnotations } from '../types.js';
 
 /**
  * Helper to create a tool from a Zod schema.
@@ -15,9 +15,22 @@ export function createTool<T extends z.ZodType>(options: {
   serverSide?: boolean;
   /** Runs on another service, so it gets no `connection`/`tabId` argument (see `getPluginTools`). */
   external?: boolean;
+  /**
+   * "At least one of these" groups that a runtime `refine` cannot express in the advertised JSON
+   * Schema. Each group becomes `anyOf: [{required:[field]}, ...]`, so a client sees the constraint
+   * before it calls: a missing `ref`/`selector` was an error only after the round trip.
+   * Two or more groups are combined with `allOf`, one `anyOf` per group.
+   */
+  requiredAnyOf?: string[][];
+  /**
+   * MCP annotations. What is not given stays conservative: nothing is advertised as read-only
+   * or idempotent unless the tool truly is, and a browser tool is always open-world because it
+   * acts on a page outside this process.
+   */
+  annotations?: ToolAnnotations;
   handle: (context: Context, params: z.infer<T>) => Promise<ToolResult>;
 }): Tool {
-  const { name, description, schema, handle, serverSide, external } = options;
+  const { name, description, schema, handle, serverSide, external, requiredAnyOf, annotations } = options;
 
   const inputSchema = z.toJSONSchema(schema, {
     io: 'input',
@@ -27,10 +40,26 @@ export function createTool<T extends z.ZodType>(options: {
   // Remove $schema property as MCP doesn't need it
   delete inputSchema.$schema;
 
+  // A single group goes at the top level; several need the `allOf` wrapper to stay independent.
+  const groups = (requiredAnyOf ?? []).filter((group) => group.length > 0);
+  if (groups.length === 1) {
+    inputSchema.anyOf = groups[0].map((field) => ({ required: [field] }));
+  } else if (groups.length > 1) {
+    const wrapped = groups.map((group) => ({ anyOf: group.map((field) => ({ required: [field] })) }));
+    const allOf = Array.isArray(inputSchema.allOf) ? (inputSchema.allOf as unknown[]) : [];
+    inputSchema.allOf = [...allOf, ...wrapped];
+  }
+
   const toolSchema: ToolSchema = {
     name,
     description,
     inputSchema,
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: !serverSide,
+      ...annotations,
+    },
   };
 
   return {

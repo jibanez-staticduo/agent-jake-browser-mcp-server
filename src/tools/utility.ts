@@ -19,6 +19,20 @@ function outDir(): string {
 }
 
 /**
+ * What a tool returns inline when the caller asked for nothing else. A whole page of HTML is
+ * several times the size of a context window, and returning all of it pushed the rest of the
+ * conversation out. `maxChars: 0` asks for everything.
+ */
+export const MAX_INLINE_OUTPUT_CHARS = 200_000;
+
+/** The two ways to take a large result out of the conversation: a file, or a chosen size. */
+export const FILENAME_FIELD = z.string().optional()
+  .describe('Write the whole output to this file in the output directory instead of returning it');
+
+export const MAX_CHARS_FIELD = z.number().int().min(0).optional()
+  .describe(`Characters to return inline (default ${MAX_INLINE_OUTPUT_CHARS}, 0 for all of it). Ignored with filename`);
+
+/**
  * Wait for a specified time.
  */
 export const waitTool: Tool = createTool({
@@ -27,6 +41,7 @@ export const waitTool: Tool = createTool({
   schema: z.object({
     ms: z.number().min(0).max(30000).describe('Milliseconds to wait (max 30 seconds)'),
   }),
+  annotations: { readOnlyHint: true, idempotentHint: true },
   async handle(context, params) {
     const response = await context.send('browser_wait', { time: params.ms / 1000 });
 
@@ -61,6 +76,7 @@ export const screenshotTool: Tool = createTool({
       .default(80)
       .describe('JPEG quality (0-100)'),
   }),
+  annotations: { readOnlyHint: true },
   async handle(context, params) {
     const response = await context.send('browser_screenshot', {
       ref: params.ref,
@@ -139,10 +155,12 @@ export const getConsoleLogsTool: Tool = createTool({
   },
 });
 
-/**
- * Text result, or written to a file when the caller asked for one: long network or
- * console dumps then cost no tokens.
- */
+/** Trim to what fits inline, naming what was left out so the caller can ask for it. */
+export function capInlineOutput(text: string, maxChars: number = MAX_INLINE_OUTPUT_CHARS): string {
+  if (maxChars <= 0 || text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}\n\n[showing ${maxChars} of ${text.length} chars: pass a larger maxChars, or 0 for all of it, or filename to write it]`;
+}
+
 async function saveOutput(content: string | Buffer, filename: string): Promise<string> {
   await mkdir(outDir(), { recursive: true });
   const { root, handle: rootHandle } = await openPinnedDirectory(outDir());
@@ -166,8 +184,12 @@ async function saveOutput(content: string | Buffer, filename: string): Promise<s
   }
 }
 
-async function outputResult(text: string, filename?: string) {
-  if (!filename) return textResult(text);
+/**
+ * Text result, or written to a file when the caller asked for one: long network or console dumps,
+ * and the HTML of a page, then cost no tokens. A file gets all of it; inline text is capped.
+ */
+export async function outputResult(text: string, filename?: string, maxChars?: number) {
+  if (!filename) return textResult(capInlineOutput(text, maxChars));
   try {
     const target = await saveOutput(text, filename);
     return textResult(`Saved to ${target} (${text.length} chars)`);
@@ -218,6 +240,7 @@ export const networkRequestsTool: Tool = createTool({
     filter: z.string().optional().describe('Case-insensitive regex on the URL'),
     filename: z.string().optional().describe('Write the output to this file instead of returning it'),
   }),
+  annotations: { readOnlyHint: true },
   async handle(context, params) {
     const response = await context.send('browser_network_requests', {
       includeStatic: params.includeStatic,
@@ -253,6 +276,7 @@ export const networkRequestTool: Tool = createTool({
     maxBodyChars: z.number().int().min(100).optional().default(20000).describe('Truncate bodies to this length'),
     filename: z.string().optional().describe('Write the output to this file instead of returning it'),
   }),
+  annotations: { readOnlyHint: true },
   async handle(context, params) {
     const response = await context.send('browser_network_request', {
       index: params.index,
@@ -294,6 +318,7 @@ export const runCodeUnsafeTool: Tool = createTool({
     code: z.string().describe('`async (page) => { ... }` or a function body'),
     filename: z.string().optional().describe('Write the output to this file instead of returning it'),
   }),
+  annotations: { destructiveHint: true },
   async handle(context, params) {
     if (process.env.AGENT_BROWSER_ALLOW_UNSAFE_CODE !== '1') {
       return errorResult('browser_run_code_unsafe is disabled: start the server with AGENT_BROWSER_ALLOW_UNSAFE_CODE=1 to allow it');
@@ -329,9 +354,11 @@ export const runCodeUnsafeTool: Tool = createTool({
  */
 export const evaluateTool: Tool = createTool({
   name: 'browser_evaluate',
-  description: 'Execute JavaScript code on the page and return the result. The code should be a valid JavaScript expression.',
+  description: 'Execute JavaScript code on the page and return the result. The code should be a valid JavaScript expression. Inline results are capped at 200000 chars: pass filename to write the whole result, or maxChars to choose.',
   schema: z.object({
     code: z.string().describe('JavaScript expression or code to execute (e.g., "document.title", "window.location.href")'),
+    filename: FILENAME_FIELD,
+    maxChars: MAX_CHARS_FIELD,
   }),
   async handle(context, params) {
     const response = await context.send('browser_evaluate', {
@@ -345,7 +372,7 @@ export const evaluateTool: Tool = createTool({
     const result = response.result;
     const formatted = typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result);
 
-    return textResult(formatted);
+    return outputResult(formatted, params.filename, params.maxChars);
   },
 });
 
@@ -379,9 +406,13 @@ export const resizeViewportTool: Tool = createTool({
  */
 export const getHtmlTool: Tool = createTool({
   name: 'browser_get_html',
-  description: 'Get the full HTML of the current page using CDP DOM.getOuterHTML. CSP-safe - works on sites that block eval.',
-  schema: z.object({}),
-  async handle(context) {
+  description: 'Get the full HTML of the current page using CDP DOM.getOuterHTML. CSP-safe - works on sites that block eval. Inline text is capped at 200000 chars: pass filename for the whole page, or maxChars to choose.',
+  schema: z.object({
+    filename: FILENAME_FIELD,
+    maxChars: MAX_CHARS_FIELD,
+  }),
+  annotations: { readOnlyHint: true },
+  async handle(context, params) {
     const response = await context.send('browser_get_html', {});
 
     if (!response.success) {
@@ -389,7 +420,7 @@ export const getHtmlTool: Tool = createTool({
     }
 
     const result = response.result as { html: string };
-    return textResult(result.html);
+    return outputResult(result.html, params.filename, params.maxChars);
   },
 });
 
@@ -466,6 +497,7 @@ export const pdfTool: Tool = createTool({
     scale: z.number().min(0.1).max(2).optional().default(1).describe('Print scale (0.1 to 2)'),
     pageRanges: z.string().optional().describe('Pages to include, e.g. "1-3" or "1,3"'),
   }),
+  annotations: { readOnlyHint: true },
   async handle(context, params) {
     const response = await context.send('browser_pdf', {
       landscape: params.landscape,

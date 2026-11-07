@@ -16,6 +16,9 @@ export const connectionsTools: Tool[] = [
       'List the browser connections currently attached to this server: connectionId, label, user agent, last activity and which one is active. Pass a returned connectionId as the "connection" argument of any other tool to drive that specific browser. Answered by the server itself, so it also works with no browser connected.',
     schema: z.object({}),
     serverSide: true,
+    // Built by hand rather than through `createTool`, so it states its own annotations: a listing
+    // answered by this server touches no page and repeats without effect.
+    annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     handle: async (context) => {
       const connections = context.listConnections ? context.listConnections() : [];
       return textResult(JSON.stringify(connections, null, 2));

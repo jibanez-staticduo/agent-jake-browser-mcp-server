@@ -3,6 +3,7 @@
  */
 import { z } from 'zod';
 import { createTool, textResult, errorResult } from './types.js';
+import { FILENAME_FIELD, MAX_CHARS_FIELD, outputResult } from './utility.js';
 import type { Tool } from '../types.js';
 
 /**
@@ -10,14 +11,18 @@ import type { Tool } from '../types.js';
  */
 export const getTextTool: Tool = createTool({
   name: 'browser_get_text',
-  description: 'Get the text content of an element.',
+  description: 'Get the text content of an element. Inline text is capped at 200000 chars: pass filename for all of it, or maxChars to choose.',
   schema: z.object({
     ref: z.string().optional().describe('Element reference from snapshot'),
     selector: z.string().optional().describe('CSS selector for the element'),
+    filename: FILENAME_FIELD,
+    maxChars: MAX_CHARS_FIELD,
   }).refine(
     data => data.ref || data.selector,
     { message: 'Either ref or selector must be provided' }
   ),
+  requiredAnyOf: [['ref', 'selector']],
+  annotations: { readOnlyHint: true, idempotentHint: true },
   async handle(context, params) {
     const response = await context.send('browser_get_text', {
       ref: params.ref,
@@ -30,7 +35,7 @@ export const getTextTool: Tool = createTool({
 
     const rawText = response.result as string | { text?: string };
     const text = typeof rawText === 'string' ? rawText : rawText.text;
-    return textResult(text || '(empty)');
+    return outputResult(text || '(empty)', params.filename, params.maxChars);
   },
 });
 
@@ -48,6 +53,8 @@ export const getAttributeTool: Tool = createTool({
     data => data.ref || data.selector,
     { message: 'Either ref or selector must be provided' }
   ),
+  requiredAnyOf: [['ref', 'selector']],
+  annotations: { readOnlyHint: true, idempotentHint: true },
   async handle(context, params) {
     const response = await context.send('browser_get_attribute', {
       ref: params.ref,
@@ -78,6 +85,8 @@ export const isVisibleTool: Tool = createTool({
     data => data.ref || data.selector,
     { message: 'Either ref or selector must be provided' }
   ),
+  requiredAnyOf: [['ref', 'selector']],
+  annotations: { readOnlyHint: true, idempotentHint: true },
   async handle(context, params) {
     const response = await context.send('browser_is_visible', {
       ref: params.ref,
@@ -112,6 +121,7 @@ export const waitForElementTool: Tool = createTool({
       .default('visible')
       .describe('State to wait for'),
   }),
+  annotations: { readOnlyHint: true, idempotentHint: true },
   async handle(context, params) {
     const response = await context.send('browser_wait_for_element', {
       selector: params.selector,
@@ -150,6 +160,7 @@ export const highlightTool: Tool = createTool({
     data => data.ref || data.selector,
     { message: 'Either ref or selector must be provided' }
   ),
+  requiredAnyOf: [['ref', 'selector']],
   async handle(context, params) {
     const response = await context.send('browser_highlight', {
       ref: params.ref,
@@ -181,6 +192,7 @@ export const getCookiesTool: Tool = createTool({
       }), 'urls must contain absolute http(s) URLs')
       .describe('Filter: only cookies that would be sent to these URLs (CDP urls param)'),
   }),
+  annotations: { readOnlyHint: true, idempotentHint: true },
   async handle(context, params) {
     if (process.env.AGENT_BROWSER_GET_COOKIES_ENABLED !== 'true') return errorResult('Cookie reading is disabled on this server.');
     const location = await context.send('browser_evaluate', { code: 'location.href' });

@@ -405,6 +405,73 @@ describe('tools/call through an MCP session', () => {
   });
 });
 
+describe('tool failures and request bodies over HTTP', () => {
+  it('answers a tool that throws with isError content, not a JSON-RPC error', async () => {
+    // A success response with no result is the shape that made `null.html` throw inside the handler.
+    const extension = await connectExtension(
+      primary,
+      pairedToken,
+      'chrome-throws',
+      undefined,
+      (message) => (message.type === 'browser_get_html' ? null : 'paged'),
+    );
+    await expect
+      .poll(async () => ((await request(primary, 'GET', '/connections')).json.connections as unknown[]).length)
+      .toBe(1);
+    const session = await openMcpSession(primary);
+
+    const res = await request(primary, 'POST', '/mcp', {
+      headers: { accept: 'application/json, text/event-stream', 'mcp-session-id': session },
+      body: {
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: { name: 'browser_get_html', arguments: { connection: 'chrome-throws' } },
+      },
+    });
+    const payload = mcpPayload(res.text);
+    expect(payload.error, res.text).toBeUndefined();
+    expect(payload.result.isError).toBe(true);
+    expect(typeof payload.result.content[0].text).toBe('string');
+
+    extension.socket.close();
+  }, 30000);
+
+  it('rejects a body above the 2 MB limit with a JSON-RPC error', async () => {
+    const session = await openMcpSession(primary);
+    const res = await request(primary, 'POST', '/mcp', {
+      headers: { accept: 'application/json, text/event-stream', 'mcp-session-id': session },
+      body: {
+        jsonrpc: '2.0',
+        id: 4,
+        method: 'tools/call',
+        params: {
+          name: 'browser_evaluate',
+          arguments: { code: 'x'.repeat(3_000_000) },
+        },
+      },
+    });
+    expect(res.status).toBe(413);
+    expect(res.json).toMatchObject({
+      jsonrpc: '2.0',
+      error: { code: -32600, message: expect.stringMatching(/2 MB/) },
+    });
+  }, 30000);
+
+  it('rejects a body that is not valid JSON with a parse error', async () => {
+    const res = await fetch(`${primary.httpBase}/mcp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{"jsonrpc":"2.0",id:5,',
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({
+      jsonrpc: '2.0',
+      error: { code: -32700, message: expect.stringMatching(/valid JSON/) },
+    });
+  }, 30000);
+});
+
 describe('agent tabs when the MCP session ends', () => {
   it('closes the tab the session opened and keeps the one it was asked to hold', async () => {
     const tabs = new Map<number, string>([[1, 'https://user.example/']]);
