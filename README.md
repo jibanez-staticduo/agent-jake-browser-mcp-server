@@ -129,6 +129,7 @@ also works while nothing is connected.
 | `MCP_HTTP_HOST` / `MCP_HTTP_PORT` | `127.0.0.1` / `8000` | MCP streamable HTTP endpoint. |
 | `BROWSER_PUBLIC_ORIGIN` | derived | Origin used to build the approval link returned by `/pair/start` and the one baked into `/install`. Set it when the proxy host is not derivable from the request. |
 | `AGENT_BROWSER_OUT_DIR` | system temp dir | Where `browser_pdf` and tool results saved with `filename` write their files. |
+| `AGENT_BROWSER_INSTALL_INSTANCE` | unset (legacy root) | Optional strict instance id `nas`, `fedora`, or `ari`. Initial downloads and `/install` target `$HOME/Downloads/agent-jake-browser/<id>` and embed the id in `config.json`. Invalid non-empty values fail closed. |
 | `AGENT_BROWSER_DROP_DIR` | unset (file drops disabled) | Directory of files available to `browser_drop`. Files must be direct children, with no symlinks; maximum 8 files and 10 MiB total per call. Mount only files intended for browser upload. MIME data-only drops remain available with a 1 MiB limit. |
 | `AGENT_BROWSER_ALLOW_UNSAFE_CODE` | unset (disabled) | Set exactly `1` to enable `browser_run_code_unsafe`, which executes arbitrary JavaScript in the MCP server process. Only use it with fully trusted MCP clients. |
 | `AGENT_BROWSER_CONNECTION_LABELS` | unset | JSON map of `connectionId` to a friendly name (e.g. `{"259bc…":"mac"}`), so an MCP session can pick a paired browser by `id` or `name` instead of the global most-recently-used. |
@@ -388,3 +389,9 @@ never the bridge's output. Passkeys stay with `browser_passkey` (WebAuthn in the
 `BROWSER_TRUST_PROXY` set to `true` trusts forwarding headers only while browser authentication is enabled.
 Keep `BROWSER_PUBLIC_WS_URL` and `BROWSER_PUBLIC_ORIGIN` instance-specific (Main, Ari, Fedora); Ari may use `/browser-ws`.
 `BROWSER_EXTENSION_DIR` mounts the signed release bundle directory. `/download/artifact.zip` serves its ZIP unchanged; `/download` adds runtime `config.json` for initial installation.
+
+### Separate local installations
+
+Set `AGENT_BROWSER_INSTALL_INSTANCE` independently on each server to `nas`, `fedora`, or `ari`, then use that server's `/download` or `/install` URL. Each installation is isolated under `$HOME/Downloads/agent-jake-browser/<id>` and retains its own `config.json`. The neutral `/download/artifact.zip` remains byte-identical for signed updates.
+
+For migration, install each instance once with its id. Existing legacy configuration is preserved and receives the missing `installInstance` identity; a configuration carrying a different identity is rejected. Keep the legacy root only for a single legacy installation: it refuses to move or back up a parent containing `nas`, `fedora`, or `ari` directories.

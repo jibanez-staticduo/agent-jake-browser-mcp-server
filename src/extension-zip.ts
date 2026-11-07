@@ -12,6 +12,7 @@ import path from 'node:path';
 export interface ExtensionConfig {
   version: 1;
   wsUrl: string;
+  installInstance?: 'nas' | 'fedora' | 'ari';
 }
 
 export interface PatchedZip {
@@ -25,8 +26,9 @@ export interface PatchedZip {
 /**
  * Exact JSON stored in the extension: keep the shape stable, the extension reads it.
  */
-export function extensionConfigJson(wsUrl: string): string {
+export function extensionConfigJson(wsUrl: string, installInstance?: ExtensionConfig['installInstance']): string {
   const config: ExtensionConfig = { version: 1, wsUrl };
+  if (installInstance) config.installInstance = installInstance;
   return JSON.stringify(config);
 }
 
@@ -51,7 +53,7 @@ export function configEntryName(entryNames: string[]): string {
  * Return a copy of `zipBuffer` with config.json injected or updated in place.
  * The source buffer is never written to disk.
  */
-export function patchZipConfig(zipBuffer: Buffer, wsUrl: string): PatchedZip {
+export function patchZipConfig(zipBuffer: Buffer, wsUrl: string, installInstance?: ExtensionConfig['installInstance']): PatchedZip {
   const zip = new AdmZip(zipBuffer);
   const entryNames = zip
     .getEntries()
@@ -59,7 +61,7 @@ export function patchZipConfig(zipBuffer: Buffer, wsUrl: string): PatchedZip {
     .map((entry) => entry.entryName);
 
   const entryName = configEntryName(entryNames);
-  const data = Buffer.from(extensionConfigJson(wsUrl), 'utf-8');
+  const data = Buffer.from(extensionConfigJson(wsUrl, installInstance), 'utf-8');
   const replaced = entryNames.includes(entryName);
 
   if (replaced) {

@@ -24,6 +24,9 @@ const HTTP_HOST = process.env.MCP_HTTP_HOST || '127.0.0.1';
 // What the extension CI published here (src/published-extension.ts): latest.json and its zip.
 const EXTENSION_DIR = process.env.BROWSER_EXTENSION_DIR || '/data/extension';
 const WS_PATH = process.env.BROWSER_WS_PATH || '/';
+const INSTALL_INSTANCE_VALUES = new Set(['nas', 'fedora', 'ari']);
+const INSTALL_INSTANCE_RAW = process.env.AGENT_BROWSER_INSTALL_INSTANCE || '';
+const INSTALL_INSTANCE = INSTALL_INSTANCE_RAW ? INSTALL_INSTANCE_RAW : undefined;
 
 const TAB_FIELD = {
   type: 'integer',
@@ -291,10 +294,10 @@ app.get('/connections', (req, res) => {
 let patchedZipCache = null;
 
 function patchedExtensionZip(zipPath, info, wsUrl) {
-  const key = JSON.stringify([zipPath, info.mtimeMs, info.size, wsUrl]);
+  const key = JSON.stringify([zipPath, info.mtimeMs, info.size, wsUrl, INSTALL_INSTANCE]);
   if (patchedZipCache && patchedZipCache.key === key) return patchedZipCache.buffer;
 
-  const patched = patchZipConfig(readFileSync(zipPath), wsUrl);
+  const patched = patchZipConfig(readFileSync(zipPath), wsUrl, INSTALL_INSTANCE);
   patchedZipCache = { key, buffer: patched.buffer };
   console.error(
     `Agent Jake Browser: ${patched.replaced ? 'updated' : 'added'} ${patched.entryName} -> ${wsUrl} (${patched.buffer.length} bytes)`,
@@ -339,6 +342,9 @@ for (const name of ['update-files.json', 'update-files.sig']) {
 }
 
 app.get('/download', async (_req, res) => {
+  if (INSTALL_INSTANCE_RAW && !INSTALL_INSTANCE_VALUES.has(INSTALL_INSTANCE_RAW)) {
+    return res.status(500).type('text/plain; charset=utf-8').send('AGENT_BROWSER_INSTALL_INSTANCE invalido.\n');
+  }
   const EXTENSION_ZIP = extensionZipPath(process.env, EXTENSION_DIR);
   try {
     const info = await stat(EXTENSION_ZIP);
@@ -381,7 +387,10 @@ app.get('/download', async (_req, res) => {
 
 // `curl -fsSL <origin>/install | bash` installs the extension (INFRA-932, src/installer.ts).
 app.get('/install', (req, res) => {
-  const script = installerScript(publicOrigin(req), publicWsUrl(req));
+  if (INSTALL_INSTANCE_RAW && !INSTALL_INSTANCE_VALUES.has(INSTALL_INSTANCE_RAW)) {
+    return res.status(500).type('text/plain; charset=utf-8').send('AGENT_BROWSER_INSTALL_INSTANCE invalido.\n');
+  }
+  const script = installerScript(publicOrigin(req), publicWsUrl(req), { installInstance: INSTALL_INSTANCE });
   if (!script) return res.status(400).type('text/plain; charset=utf-8').send('Origen o WS no válido para el instalador.\n');
   res.setHeader('Cache-Control', 'no-cache');
   return res.type('text/plain; charset=utf-8').send(script);
