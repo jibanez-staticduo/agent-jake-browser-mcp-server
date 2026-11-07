@@ -69,6 +69,7 @@ async function startServer(options: {
   tokenStore: string;
   publicWsUrl?: string;
   extensionDir?: string;
+  installInstance?: string;
 }): Promise<RunningServer> {
   const env: Record<string, string> = {
     ...process.env as Record<string, string>,
@@ -83,6 +84,8 @@ async function startServer(options: {
   };
   delete env.BROWSER_PUBLIC_WS_URL;
   if (options.publicWsUrl) env.BROWSER_PUBLIC_WS_URL = options.publicWsUrl;
+  if (options.installInstance !== undefined) env.AGENT_BROWSER_INSTALL_INSTANCE = options.installInstance;
+  else delete env.AGENT_BROWSER_INSTALL_INSTANCE;
 
   const child = spawn(process.execPath, ['dist/http-server.js'], {
     cwd: repoRoot,
@@ -557,6 +560,45 @@ describe('download with BROWSER_PUBLIC_WS_URL', () => {
     expect(names).toContain('.vite/manifest.json');
     expect(zip.readAsText('assets/index.js')).toContain('console.log("extension")');
     expect(zip.readAsText('manifest.json')).toContain('ajb-test');
+  });
+
+  it.each(['nas', 'fedora', 'ari'])('injects the selected install identity (%s)', async (instance) => {
+    const server = await startServer({ httpPort: dlHttpPort + 10 + ['nas', 'fedora', 'ari'].indexOf(instance), wsPort: dlWsPort + 10 + ['nas', 'fedora', 'ari'].indexOf(instance), zipPath: dlZipFile, tokenStore: join(tempDir, `${instance}-tokens.json`), publicWsUrl: DOWNLOAD_WS_URL, installInstance: instance });
+    const download = await request(server, 'GET', '/download');
+    expect(download.status).toBe(200);
+    expect(JSON.parse(configInZip(download.buffer).content)).toEqual({ version: 1, wsUrl: DOWNLOAD_WS_URL, installInstance: instance });
+    const install = await request(server, 'GET', '/install');
+    expect(install.status).toBe(200); expect(install.text).toContain(`/agent-jake-browser/${instance}`);
+    server.child.kill('SIGKILL');
+  });
+
+  it('fails closed for unknown and whitespace-padded install identities', async () => {
+    for (const value of ['windows', ' nas ']) {
+      const server = await startServer({ httpPort: dlHttpPort + 30 + value.length, wsPort: dlWsPort + 30 + value.length, zipPath: dlZipFile, tokenStore: join(tempDir, `bad-${value.length}.json`), publicWsUrl: DOWNLOAD_WS_URL, installInstance: value });
+      expect((await request(server, 'GET', '/download')).status).toBe(500);
+      expect((await request(server, 'GET', '/install')).status).toBe(500);
+      server.child.kill('SIGKILL');
+    }
+  });
+
+  it('derives the WS URL for an instance when no explicit public WS URL is configured', async () => {
+    const server = await startServer({
+      httpPort: dlHttpPort + 50,
+      wsPort: dlWsPort + 50,
+      zipPath: dlZipFile,
+      tokenStore: join(tempDir, 'derived-instance-tokens.json'),
+      installInstance: 'nas',
+    });
+    const download = await request(server, 'GET', '/download', {
+      headers: { 'x-forwarded-proto': 'https', 'x-forwarded-host': 'nas.example.test' },
+    });
+    expect(download.status).toBe(200);
+    expect(JSON.parse(configInZip(download.buffer).content)).toEqual({
+      version: 1,
+      wsUrl: 'wss://nas.example.test/',
+      installInstance: 'nas',
+    });
+    server.child.kill('SIGKILL');
   });
 
   it('caches the patched archive across requests', async () => {

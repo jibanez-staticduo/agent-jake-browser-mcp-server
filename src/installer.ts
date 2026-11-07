@@ -2,10 +2,11 @@
 const ORIGIN_RE = /^https?:\/\/[A-Za-z0-9.-]+(:\d{1,5})?$/;
 const WS_RE = /^wss?:\/\/[A-Za-z0-9.-]+(:\d{1,5})?(\/[-A-Za-z0-9._~%!$&()*+,;=:@\/]*)?$/;
 const PUBLIC_KEY_DER_B64 = 'MCowBQYDK2VwAyEA8c8tp8Jvr8S8GnkZHdL79/6y9f/99sisBAooeem1wRQ=';
+const INSTALL_INSTANCE_RE = /^(nas|fedora|ari)$/;
 
 const SCRIPT = `#!/usr/bin/env bash
 set -euo pipefail
-ORIGIN='__ORIGIN__'; WS_URL='__WS_URL__'; DEST="$HOME/Downloads/agent-jake-browser"
+ORIGIN='__ORIGIN__'; WS_URL='__WS_URL__'; INSTALL_INSTANCE='__INSTALL_INSTANCE__'; DEST="$HOME/Downloads/agent-jake-browser"
 command -v curl >/dev/null || { echo 'Falta curl; no se instala nada.' >&2; exit 1; }
 command -v python3 >/dev/null || { echo 'Falta python3; no se instala nada.' >&2; exit 1; }
 command -v openssl >/dev/null || { echo 'Falta openssl con soporte Ed25519; no se instala nada.' >&2; exit 1; }
@@ -15,9 +16,9 @@ cleanup() { rm -rf "$tmp" "$stage"; }; trap cleanup EXIT HUP INT TERM
 curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "$ORIGIN/download/latest.json" -o "$tmp/latest.json"
 curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "$ORIGIN/download/artifact.zip" -o "$tmp/artifact.zip"
 printf '%s' '__PUBKEY__' > "$tmp/pubkey.b64"
-python3 - "$tmp/latest.json" "$tmp/artifact.zip" "$tmp/pubkey.b64" "$WS_URL" "$stage" "$DEST" <<'PY'
+python3 - "$tmp/latest.json" "$tmp/artifact.zip" "$tmp/pubkey.b64" "$WS_URL" "$INSTALL_INSTANCE" "$stage" "$DEST" <<'PY'
 import base64, hashlib, json, os, pathlib, re, subprocess, sys, zipfile
-latest_path, archive, pubkey_b64_path, ws_url, stage, dest = sys.argv[1:]
+latest_path, archive, pubkey_b64_path, ws_url, install_instance, stage, dest = sys.argv[1:]
 try:
     latest = json.load(open(latest_path, encoding='utf-8'))
     pubkey = os.path.join(os.path.dirname(archive), 'release.pub')
@@ -54,25 +55,41 @@ try:
     cfg = os.path.join(stage, 'config.json')
     old_cfg = os.path.join(dest, 'config.json')
     if os.path.isfile(old_cfg) and not os.path.islink(old_cfg):
-        pathlib.Path(cfg).write_bytes(pathlib.Path(old_cfg).read_bytes())
+        existing = json.loads(pathlib.Path(old_cfg).read_text(encoding='utf-8'))
+        if not isinstance(existing, dict) or existing.get('version') != 1 or not isinstance(existing.get('wsUrl'), str): raise ValueError('config invalida')
+        if install_instance and existing.get('installInstance') not in (None, install_instance): raise ValueError('identidad de instalacion no coincide')
+        if not install_instance and existing.get('installInstance') not in (None, ''): raise ValueError('identidad de instalacion no coincide')
+        if install_instance and existing.get('installInstance') is None:
+            existing['installInstance'] = install_instance
+            pathlib.Path(cfg).write_text(json.dumps(existing, separators=(',', ':')), encoding='utf-8')
+        else:
+            pathlib.Path(cfg).write_bytes(pathlib.Path(old_cfg).read_bytes())
     else:
-        json.dump({'version':1, 'wsUrl':ws_url}, open(cfg, 'w', encoding='utf-8'), separators=(',', ':'))
+        config = {'version':1, 'wsUrl':ws_url}
+        if install_instance: config['installInstance'] = install_instance
+        json.dump(config, open(cfg, 'w', encoding='utf-8'), separators=(',', ':'))
 except Exception as exc:
     print('No se instala: artefacto o firma no verificable (%s).' % exc, file=sys.stderr); sys.exit(1)
 PY
 if [ -e "$DEST" ] || [ -L "$DEST" ]; then
   [ -d "$DEST" ] && [ -f "$DEST/manifest.json" ] && [ ! -L "$DEST" ] || { echo 'Destino existente no es una extension verificada; no se toca.' >&2; exit 1; }
+  if [ -z "$INSTALL_INSTANCE" ] && { [ -e "$DEST/nas" ] || [ -e "$DEST/fedora" ] || [ -e "$DEST/ari" ]; }; then
+    echo 'Destino legacy contiene instalaciones por instancia; no se mueve ni respalda.' >&2; exit 1
+  fi
   mv -- "$DEST" "$DEST.backup.$(date +%s)"
 fi
 mv -- "$stage" "$DEST"
 echo "Extension verificada instalada en $DEST. Carga la carpeta desde chrome://extensions."
 `;
 
-export function installerScript(origin: string, wsUrl: string, options: { publicKeyDerB64?: string } = {}): string | null {
+export function installerScript(origin: string, wsUrl: string, options: { publicKeyDerB64?: string; installInstance?: string } = {}): string | null {
   if (!ORIGIN_RE.test(origin) || !WS_RE.test(wsUrl)) return null;
   const publicKey = options.publicKeyDerB64 ?? PUBLIC_KEY_DER_B64;
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(publicKey)) return null;
-  return SCRIPT.replace('__ORIGIN__', origin).replace('__WS_URL__', wsUrl).replace('__PUBKEY__', publicKey);
+  const installInstance = options.installInstance || '';
+  if (installInstance && !INSTALL_INSTANCE_RE.test(installInstance)) return null;
+  const destination = installInstance ? `$HOME/Downloads/agent-jake-browser/${installInstance}` : '$HOME/Downloads/agent-jake-browser';
+  return SCRIPT.replace('__ORIGIN__', origin).replace('__WS_URL__', wsUrl).replace('__PUBKEY__', publicKey).replace('__INSTALL_INSTANCE__', installInstance).replace('$HOME/Downloads/agent-jake-browser', destination);
 }
 
 export const installerPublicKey = PUBLIC_KEY_DER_B64;
