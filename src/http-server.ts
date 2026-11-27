@@ -156,7 +156,11 @@ async function callTool(name, rawArgs, sessionId) {
 
   if (name === 'browser_list_connections') {
     const mine = sessionId ? sessionDefaults.get(sessionId) : undefined;
-    const rows = context.listConnections().map((c) => ({
+    const connections = context.listConnections();
+    const configured = DEFAULT_CONNECTION && findConnection(
+      DEFAULT_CONNECTION, connections.filter((c) => c.open !== false), CONNECTION_LABELS,
+    );
+    const rows = connections.map((c) => ({
       name: nameOf(c, CONNECTION_LABELS) || null,
       connectionId: c.connectionId,
       label: c.label,
@@ -167,9 +171,7 @@ async function callTool(name, rawArgs, sessionId) {
       userAgent: c.userAgent,
       secondsSinceLastActivity: c.secondsSinceLastActivity,
       thisSession: c.connectionId === mine,
-      configuredDefault: !!DEFAULT_CONNECTION &&
-        [c.connectionId, nameOf(c, CONNECTION_LABELS)].some((v) =>
-          v && normalizeConnectionName(v) === normalizeConnectionName(DEFAULT_CONNECTION)),
+      configuredDefault: configured?.status === 'found' && c.connectionId === configured.connection.connectionId,
     }));
     return textContent(JSON.stringify(rows, null, 2));
   }
@@ -593,11 +595,13 @@ app.post('/extension/reload', async (req, res) => {
   const wanted = String(req.body?.connection || '').trim();
   if (!wanted) return res.status(400).json({ ok: false, error: 'connection (id or name) is required' });
   const hit = findConnection(wanted, openConnections(), CONNECTION_LABELS);
-  if (!hit) return res.status(404).json({ ok: false, error: `no open connection "${wanted}"` });
+  if (hit.status === 'missing') return res.status(404).json({ ok: false, error: `no open connection "${wanted}"` });
+  if (hit.status === 'ambiguous') return res.status(409).json({ ok: false, error: hit.error });
+  const { connectionId } = hit.connection;
 
   const before = Date.now();
   try {
-    const answer = await context.forConnection(hit.connectionId).send('browser_reload_extension', {});
+    const answer = await context.forConnection(connectionId).send('browser_reload_extension', {});
     if (!answer.success) return res.status(502).json({ ok: false, error: answer.error?.message || 'reload refused' });
   } catch (err) {
     return res.status(502).json({ ok: false, error: String(err?.message || err) });
@@ -605,8 +609,8 @@ app.post('/extension/reload', async (req, res) => {
   const timeoutMs = Math.min(Number(req.body?.timeoutMs) || 60000, 180000);
   for (let waited = 0; waited < timeoutMs; waited += 500) {
     await new Promise((r) => setTimeout(r, 500));
-    const back = context.listConnections().find((c) => c.connectionId === hit.connectionId && c.open !== false && c.connectedAt > before);
-    if (back) return res.json({ ok: true, connectionId: hit.connectionId, name: nameOf(back, CONNECTION_LABELS) || null, reconnectedAfterMs: back.connectedAt - before });
+    const back = context.listConnections().find((c) => c.connectionId === connectionId && c.open !== false && c.connectedAt > before);
+    if (back) return res.json({ ok: true, connectionId, name: nameOf(back, CONNECTION_LABELS) || null, reconnectedAfterMs: back.connectedAt - before });
   }
   return res.status(504).json({ ok: false, error: `reload sent but ${wanted} did not reconnect within ${timeoutMs} ms` });
 });

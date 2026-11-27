@@ -2,7 +2,7 @@
  * Pairing token store persistence.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, symlinkSync, lstatSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTokenStore } from '../src/token-store.ts';
@@ -90,6 +90,41 @@ describe('token store', () => {
     expect(createTokenStore(join(tempDir, 'existing', 'deep', 'tokens.json')).isValid(token)).toBe(true);
   });
 
+  it.each([true, false])('rejects a token file symlink before approval and before writing (target exists: %s)', (targetExists) => {
+    const target = join(tempDir, 'target.json');
+    const link = join(tempDir, 'linked-tokens.json');
+    const existingTokens = JSON.stringify([{ token: 'legacy-test-token', createdAt: 'x' }]);
+    if (targetExists) writeFileSync(target, existingTokens);
+    symlinkSync(target, link, 'file');
+    const store = createTokenStore(link);
+    const existingEntries = readdirSync(tempDir);
+
+    expect(() => store.checkBoundTokenStorage()).toThrow('Set BROWSER_TOKEN_STORE to a direct file path');
+    expect(() => store.issueBoundToken({ connectionId: 'test-browser', label: 'Test browser' }))
+      .toThrow('Set BROWSER_TOKEN_STORE to a direct file path');
+    expect(store.isValid('legacy-test-token')).toBe(targetExists);
+    expect(store.getBoundIdentity('test-browser')).toBeUndefined();
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readdirSync(tempDir)).toEqual(existingEntries);
+    if (targetExists) expect(readFileSync(target, 'utf8')).toBe(existingTokens);
+  });
+
+  it('persists a new direct file through a symlinked parent directory', () => {
+    const directory = join(tempDir, 'persistent');
+    const link = join(tempDir, 'linked-directory');
+    mkdirSync(directory);
+    symlinkSync(directory, link, 'junction');
+    const store = createTokenStore(join(link, 'tokens.json'));
+    expect(() => store.checkBoundTokenStorage()).not.toThrow();
+    const identity = { connectionId: 'test-browser', label: 'Test browser' };
+    store.issueBoundToken(identity);
+    const token = store.issueBoundToken({ connectionId: 'another-browser', label: 'Another browser' });
+    const reloaded = createTokenStore(join(directory, 'tokens.json'));
+    expect(reloaded.list()).toHaveLength(2);
+    expect(reloaded.isValid(token, 'another-browser')).toBe(true);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+  });
+
   it.skipIf(process.platform !== 'linux')('rejects a token-file mount and persists under a mounted directory', async () => {
     const { realpathSync } = await vi.importActual<typeof import('node:fs')>('node:fs');
     const directory = join(tempDir, 'persistent data');
@@ -102,11 +137,14 @@ describe('token store', () => {
 
     vi.mocked(readFileSync).mockReturnValueOnce(mountRow(tokenPath));
     expect(() => store.checkBoundTokenStorage()).toThrow('Mount the parent directory of BROWSER_TOKEN_STORE');
+    const identity = { connectionId: 'provisioned-test-browser', label: 'Provisioned browser' };
+    vi.mocked(readFileSync).mockReturnValueOnce(mountRow(tokenPath));
+    expect(() => store.issueBoundToken(identity)).toThrow('Mount the parent directory of BROWSER_TOKEN_STORE');
     expect(store.isValid('legacy-test-token')).toBe(true);
+    expect(store.getBoundIdentity(identity.connectionId)).toBeUndefined();
 
     vi.mocked(readFileSync).mockReturnValueOnce(mountRow(directory));
     expect(() => store.checkBoundTokenStorage()).not.toThrow();
-    const identity = { connectionId: 'provisioned-test-browser', label: 'Provisioned browser' };
     const issuedToken = store.issueBoundToken(identity);
     const reloaded = createTokenStore(tokenPath);
     expect(reloaded.isValid('legacy-test-token')).toBe(true);

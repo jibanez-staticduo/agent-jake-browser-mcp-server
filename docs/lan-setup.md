@@ -20,9 +20,9 @@ Set `AGENT_BROWSER_SETUP_FILE` separately on NAS, Defend (Fedora), and Ari. Moun
 
 ### Token store volume
 
-Mount a writable volume or bind mount at the directory containing `BROWSER_TOKEN_STORE` (by default, `/app/data` contains `/app/data/tokens.json`). LAN setup uses atomic file replacement to persist credentials. On Linux, approval returns HTTP `503` if the token store file itself is a mount point.
+Mount a writable volume or bind mount at the directory containing `BROWSER_TOKEN_STORE` (by default, `/app/data` contains `/app/data/tokens.json`). LAN setup uses atomic file replacement to persist credentials. Point `BROWSER_TOKEN_STORE` directly at the JSON file. Approval returns HTTP `503` for a file symlink, including a dangling symlink, or for a single-file mount on Linux. A symlink to the parent directory is supported.
 
-For an existing single-file mount, stop the instance and back up the token file privately. Copy it into the new persistent directory with access restricted to the server user. Replace the file mount with a mount of that directory and point `BROWSER_TOKEN_STORE` to the copied file inside it. Restart the instance and check that existing browsers reconnect before pairing another browser. The setup configuration file can still be mounted read-only.
+For an existing single-file mount or file symlink, stop the instance and back up the token file privately. If the symlink already points to a regular file inside a writable persistent directory, set `BROWSER_TOKEN_STORE` to that file's direct path. Otherwise, copy the token file into a writable persistent directory with access restricted to the server user, mount that directory, and point `BROWSER_TOKEN_STORE` to the copied file. Restart the instance and check that existing browsers reconnect before pairing another browser. The setup configuration file can still be mounted read-only.
 
 ## Nginx Proxy Manager
 
@@ -66,7 +66,7 @@ The extension calls `POST /setup/start` with JSON containing optional `host` and
 
 The extension polls via `POST /setup/status` with JSON `{ "pollSecret": "..." }`. The first approved poll persists the browser token and receives `{ state: "approved", config: { connectionId, label, wsUrl, token, baseUrl, apiKey, mcpUrl, mcpToken } }`. Use the same poll secret to recover the same configuration if the request or response is lost. Retry HTTP `503` while the original exchange is active. A poll following expiry, revocation or a server restart returns `{ state: "expired" }`.
 
-The server assigns a fresh UUID and binds the browser token to that UUID. It stores a distinct label for routing and keeps that label if the extension changes its local display name. Operators can change the routing name through `AGENT_BROWSER_CONNECTION_LABELS`. Use UUIDs for stable routing because users can supply host and profile names.
+The server assigns a fresh UUID and binds the browser token to that UUID. It stores a distinct label for routing and keeps that label if the extension changes its local display name. Operators can change the routing name through `AGENT_BROWSER_CONNECTION_LABELS`. If multiple open browsers have the same routing name, MCP tool calls report ambiguity and `POST /extension/reload` returns HTTP `409`. Use the exact connection ID to select a browser or configure `AGENT_BROWSER_DEFAULT_CONNECTION`.
 
 ## Repeat pairing and revocation
 

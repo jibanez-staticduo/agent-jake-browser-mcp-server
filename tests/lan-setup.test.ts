@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { once } from 'node:events';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -86,19 +86,19 @@ function writeConfig(overrides: Partial<typeof settings> = {}, file = configFile
   }));
 }
 
-function spawnServer(setupFile = configFilePath) {
+function spawnServer(setupFile = configFilePath, envOverrides: NodeJS.ProcessEnv = {}) {
   return spawn(process.execPath, ['dist/http-server.js'], {
     env: { ...process.env, MCP_HTTP_PORT: String(httpPort), MCP_HTTP_HOST: '127.0.0.1',
       BROWSER_WS_PORT: String(httpPort + 1), BROWSER_WS_HOST: '127.0.0.1',
       AGENT_BROWSER_SETUP_FILE: setupFile, BROWSER_TOKEN_STORE: tokenFilePath, BROWSER_WS_TOKEN: staticToken,
       BROWSER_ALLOW_PAIRING: 'false', AGENT_BROWSER_DEFAULT_CONNECTION: 'Reserved - Default',
-      AGENT_BROWSER_CONNECTION_LABELS: JSON.stringify({ [oldId]: 'Reserved - Alias' }) },
+      AGENT_BROWSER_CONNECTION_LABELS: JSON.stringify({ [oldId]: 'Reserved - Alias' }), ...envOverrides },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
 }
 
-async function startServer() {
-  child = spawnServer();
+async function startServer(envOverrides: NodeJS.ProcessEnv = {}) {
+  child = spawnServer(configFilePath, envOverrides);
   let stderr = '';
   child.stderr?.on('data', (s) => { stderr += s; });
   for (let retry = 0; retry < 100; retry++) {
@@ -235,6 +235,23 @@ describe('LAN provisioning', () => {
     }
   });
 
+  it('keeps LAN approval pending when the configured token file is a symlink', async () => {
+    const target = join(tokenFilePath, '..', 'linked-target.json');
+    const original = readFileSync(tokenFilePath, 'utf8');
+    renameSync(tokenFilePath, target);
+    symlinkSync(target, tokenFilePath, 'file');
+    try {
+      const exchange = (await start({ host: 'Example', profile: 'Linked storage' })).json;
+      expect((await approve(exchange.approvalCode)).status).toBe(503);
+      expect((await status(exchange.pollSecret)).json).toEqual({ state: 'pending' });
+      expect(lstatSync(tokenFilePath).isSymbolicLink()).toBe(true);
+      expect(readFileSync(target, 'utf8')).toBe(original);
+    } finally {
+      rmSync(tokenFilePath);
+      renameSync(target, tokenFilePath);
+    }
+  });
+
   it('reserves the routing names of already connected browsers', async () => {
     const socket = await openSocket({
       connectionId: 'Example - Old ID', label: 'Example - Old Label', token: staticToken,
@@ -330,4 +347,90 @@ describe('LAN provisioning', () => {
     expect(store.status(expiring.pollSecret)).toEqual({ state: 'expired' });
     expect(issued).toBe(2);
   });
+
+  it('requires a UUID for a shared routing name in either browser connection order', async () => {
+    const { approvalCode, pollSecret } = (await start({ host: 'Routing', profile: 'Chrome' })).json;
+    expect((await approve(approvalCode)).status).toBe(200);
+    const { connectionId, label, token } = (await status(pollSecret)).json.config;
+    await stopServer();
+    await startServer({
+      AGENT_BROWSER_CONNECTION_LABELS: JSON.stringify({ [oldId]: label.toUpperCase() }),
+      AGENT_BROWSER_DEFAULT_CONNECTION: label,
+    });
+
+    const browsers = [{ connectionId, token }, { connectionId: oldId, token: legacyToken }];
+    try {
+      for (const ordering of [browsers, [...browsers].reverse()]) {
+        const sockets: WebSocket[] = [];
+        const seen: string[][] = [];
+        try {
+          for (const browser of ordering) {
+            const socket = await openSocket(browser);
+            if (typeof socket === 'number') throw new Error(`Unexpected handshake status ${socket}`);
+            sockets.push(socket);
+            const commands: string[] = [];
+            seen.push(commands);
+            socket.on('message', (raw) => {
+              const { id, type } = JSON.parse(raw.toString());
+              commands.push(type);
+              const response = type === 'browser_reload_extension'
+                ? { id, success: false, error: { message: 'test browser received reload' } }
+                : { id, success: true, result: [] };
+              socket.send(JSON.stringify(response));
+            });
+          }
+
+          const headers = { accept: 'application/json, text/event-stream' };
+          const initialized = await http('/mcp', { headers, body: {
+            jsonrpc: '2.0', id: 1, method: 'initialize',
+            params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'vitest', version: '1' } },
+          } });
+          const sessionHeaders = { ...headers, 'mcp-session-id': String(initialized.headers['mcp-session-id']) };
+          await http('/mcp', { headers: sessionHeaders, body: { jsonrpc: '2.0', method: 'notifications/initialized' } });
+          async function call(name: string, args: object = {}) {
+            const reply = await http('/mcp', { headers: sessionHeaders, body: {
+              jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name, arguments: args },
+            } });
+            const data = reply.text.split('\n').find((line) => line.startsWith('data: '));
+            return (data ? JSON.parse(data.slice(6)) : reply.json).result;
+          }
+
+          const list = await call('browser_list_connections');
+          const entries = JSON.parse(list.content[0].text);
+          expect(entries.map((entry: { connectionId: string }) => entry.connectionId))
+            .toEqual(ordering.map((browser) => browser.connectionId));
+          expect(entries.every((entry: { configuredDefault: boolean }) => entry.configuredDefault === false)).toBe(true);
+          for (const args of [{}, { connection: label }]) {
+            const result = await call('browser_reload', args);
+            expect(result.isError).toBe(true);
+            expect(result.content[0].text).toContain('ambiguous');
+            for (const browser of browsers) expect(result.content[0].text).toContain(browser.connectionId);
+          }
+          const ambiguous = await http('/extension/reload', { body: { connection: label } });
+          expect(ambiguous.status).toBe(409);
+          expect(ambiguous.json.error).toContain('ambiguous');
+          expect(seen).toEqual([[], []]);
+
+          const selected = ordering.findIndex((browser) => browser.connectionId === connectionId);
+          expect((await call('browser_reload', { connection: connectionId })).isError).toBeUndefined();
+          expect((await call('browser_reload')).isError).toBeUndefined();
+          const exact = await http('/extension/reload', { body: { connection: connectionId } });
+          expect(exact.status).toBe(502);
+          expect(exact.json.error).toBe('test browser received reload');
+          expect(seen[selected].filter((type) => type !== 'browser_list_tabs')).toEqual([
+            'browser_reload', 'browser_reload', 'browser_reload_extension',
+          ]);
+          expect(seen[1 - selected]).toEqual([]);
+        } finally {
+          await Promise.all(sockets.map(async (socket) => {
+            socket.close();
+            await once(socket, 'close');
+          }));
+        }
+      }
+    } finally {
+      await stopServer();
+      await startServer();
+    }
+  }, 15000);
 });

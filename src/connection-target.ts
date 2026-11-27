@@ -25,6 +25,11 @@ export type TargetResult =
   | { ok: true; connectionId: string; sticky: boolean }
   | { ok: false; error: string };
 
+type ConnectionMatch =
+  | { status: 'found'; connection: OpenConnection }
+  | { status: 'ambiguous'; error: string }
+  | { status: 'missing' };
+
 export function parseLabels(raw: string | undefined): Record<string, string> {
   if (!raw) return {};
   try {
@@ -48,17 +53,23 @@ export function normalizeConnectionName(name: string): string {
   return name.trim().toLowerCase();
 }
 
-/** Match an id or a friendly name (case-insensitive) against the open connections. */
+/** Prefer an exact id, then match ids and friendly names case-insensitively. */
 export function findConnection(
   wanted: string,
   open: OpenConnection[],
   labels: Record<string, string>,
-): OpenConnection | undefined {
+): ConnectionMatch {
+  const exact = open.find((c) => c.connectionId === wanted);
+  if (exact) return { status: 'found', connection: exact };
+
   const w = normalizeConnectionName(wanted);
-  return (
-    open.find((c) => normalizeConnectionName(c.connectionId) === w) ??
-    open.find((c) => normalizeConnectionName(nameOf(c, labels)) === w)
-  );
+  const ids = open.filter((c) => normalizeConnectionName(c.connectionId) === w);
+  const matches = ids.length ? ids : open.filter((c) => normalizeConnectionName(nameOf(c, labels)) === w);
+  if (matches.length === 1) return { status: 'found', connection: matches[0] };
+  if (!matches.length) return { status: 'missing' };
+
+  const choices = matches.map((c) => c.connectionId).sort().join(', ');
+  return { status: 'ambiguous', error: `Browser connection "${wanted}" is ambiguous. Specify an exact connection ID: ${choices}.` };
 }
 
 function describe(open: OpenConnection[], labels: Record<string, string>): string {
@@ -77,7 +88,8 @@ export function resolveTarget(input: {
 
   if (requested) {
     const hit = findConnection(requested, open, labels);
-    if (hit) return { ok: true, connectionId: hit.connectionId, sticky: true };
+    if (hit.status === 'found') return { ok: true, connectionId: hit.connection.connectionId, sticky: true };
+    if (hit.status === 'ambiguous') return { ok: false, error: hit.error };
     return {
       ok: false,
       error: `No browser connection "${requested}" (open: ${describe(open, labels)}). Call browser_list_connections to see the current ones.`,
@@ -90,7 +102,8 @@ export function resolveTarget(input: {
 
   if (configuredDefault) {
     const hit = findConnection(configuredDefault, open, labels);
-    if (hit) return { ok: true, connectionId: hit.connectionId, sticky: false };
+    if (hit.status === 'found') return { ok: true, connectionId: hit.connection.connectionId, sticky: false };
+    if (hit.status === 'ambiguous') return { ok: false, error: hit.error };
   }
 
   if (open.length === 1) return { ok: true, connectionId: open[0].connectionId, sticky: false };

@@ -6,7 +6,7 @@
  * makes the tokens survive a container restart.
  */
 import { randomBytes } from 'crypto';
-import { mkdirSync, readFileSync, writeFileSync, existsSync, realpathSync, renameSync, rmSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, lstatSync, realpathSync, renameSync, rmSync } from 'fs';
 import { dirname } from 'path';
 import { normalizeConnectionName } from './connection-target.js';
 import { logger } from './utils/logger.js';
@@ -85,7 +85,11 @@ export function createTokenStore(
   }
 
   function checkBoundTokenStorage(): void {
-    if (process.platform !== 'linux' || !existsSync(filePath)) return;
+    const entry = lstatSync(filePath, { throwIfNoEntry: false });
+    if (entry?.isSymbolicLink()) {
+      throw new Error('Set BROWSER_TOKEN_STORE to a direct file path for LAN setup');
+    }
+    if (process.platform !== 'linux' || !entry) return;
     const target = realpathSync.native(filePath);
     // Linux mountinfo escapes whitespace and backslashes as octal sequences.
     const mountPoints = readFileSync('/proc/self/mountinfo', 'utf-8').split('\n')
@@ -96,6 +100,7 @@ export function createTokenStore(
   }
 
   function issueBoundToken(identity: { label: string; connectionId: string }): string {
+    checkBoundTokenStorage();
     const token = randomBytes(32).toString('hex');
     const record: TokenRecord = { token, createdAt: new Date().toISOString(), ...identity, bound: true };
     const pending = `${filePath}.${randomBytes(8).toString('hex')}.tmp`;
