@@ -35,8 +35,17 @@ describe('resolveTarget', () => {
   });
 
   it('matches ids, names and handshake labels', () => {
-    expect(findConnection('259bc3e6-a078', [MAC], labels)).toBe(MAC);
-    expect(findConnection('work', [{ connectionId: 'z', label: 'work' }], {})?.connectionId).toBe('z');
+    expect(findConnection('259bc3e6-a078', [MAC], labels)).toEqual({ status: 'found', connection: MAC });
+    expect(findConnection('work', [{ connectionId: 'z', label: 'work' }], {}))
+      .toEqual({ status: 'found', connection: { connectionId: 'z', label: 'work' } });
     expect(parseLabels('not json')).toEqual({});
+  });
+
+  it('prefers an exact ID when older browsers use case variants of that ID', () => {
+    const upper = { connectionId: MAC.connectionId.toUpperCase() };
+    const fakeName = { connectionId: X86.connectionId, label: MAC.connectionId };
+    const open = [upper, fakeName, MAC];
+    expect(findConnection(MAC.connectionId, open, {})).toEqual({ status: 'found', connection: MAC });
+    expect(findConnection('259bc3e6-A078', open, {})).toMatchObject({ status: 'ambiguous' });
   });
 });

@@ -12,6 +12,7 @@ import { logger } from './utils/logger.js';
 import { getSharedTokenStore, type TokenStore } from './token-store.js';
 import { getClientIpInfo, parseTrustedProxyIps } from './client-ip.js';
 import { ConnectionRegistry, type ManagedConnection } from './connection-registry.js';
+import { parseLabels, normalizeConnectionName } from './connection-target.js';
 import type { BrowserConnectionInfo, ExtensionMessage, ExtensionResponse, ToolName } from './types.js';
 
 /** How long the extension gets to answer a command that does not wait by itself. */
@@ -45,6 +46,7 @@ export interface WSServerOptions {
   port: number;
   host?: string;
   tokenStore?: TokenStore;
+  isSetupNameReserved?: (name: string) => boolean;
   onConnection?: (ws: WebSocket, connectionId: string) => void;
   onDisconnection?: (connectionId: string) => void;
   onMessage?: (message: ExtensionResponse) => void;
@@ -73,11 +75,11 @@ export interface WSServer {
 }
 
 /**
- * Auth is on when a static token is configured or pairing tokens are accepted.
+ * Auth is on when a static token, LAN setup or manual pairing is configured.
  * With neither, the socket stays open (LAN / ssh-tunnel compatibility).
  */
 export function isAuthEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return (env.BROWSER_WS_TOKEN || '') !== '' || env.BROWSER_ALLOW_PAIRING === 'true';
+  return !!(env.BROWSER_WS_TOKEN || env.AGENT_BROWSER_SETUP_FILE?.trim()) || env.BROWSER_ALLOW_PAIRING === 'true';
 }
 
 export function parseHandshakeParams(reqUrl: string, hostHeader?: string): HandshakeParams {
@@ -105,11 +107,12 @@ export function isAuthorizedToken(
   token: string | null,
   tokenStore: TokenStore,
   env: NodeJS.ProcessEnv = process.env,
+  connectionId?: string | null,
 ): boolean {
   if (!token) return false;
   const staticToken = env.BROWSER_WS_TOKEN || '';
   if (staticToken && safeEqual(token, staticToken)) return true;
-  return tokenStore.isValid(token);
+  return tokenStore.isValid(token, connectionId);
 }
 
 /**
@@ -118,6 +121,7 @@ export function isAuthorizedToken(
 export function createWSServer(options: WSServerOptions): WSServer {
   const { port, onConnection, onDisconnection, onMessage } = options;
   const tokenStore = options.tokenStore ?? getSharedTokenStore();
+  const connectionLabels = parseLabels(process.env.AGENT_BROWSER_CONNECTION_LABELS);
   const registry = new ConnectionRegistry();
   const trustedProxyIps = parseTrustedProxyIps(process.env.BROWSER_TRUSTED_PROXY_IPS);
   const pendingRequests = new Map<string, {
@@ -143,9 +147,27 @@ export function createWSServer(options: WSServerOptions): WSServer {
   // by the pairing page) is required whenever auth is enabled.
   const host = options.host || process.env.BROWSER_WS_HOST || '127.0.0.1';
 
-  function authorize(token: string | null): boolean {
+  function isReservedName(name: string | null): boolean {
+    if (!name?.trim()) return false;
+    return tokenStore.isBoundName(name) || !!options.isSetupNameReserved?.(name) ||
+      Object.entries(connectionLabels).some(([id, alias]) =>
+        normalizeConnectionName(alias) === normalizeConnectionName(name) && !!tokenStore.getBoundIdentity(id));
+  }
+
+  function authorize(params: HandshakeParams): boolean {
+    const identity = boundIdentity(params);
+    if (identity) {
+      return !!params.token && safeEqual(identity.token, params.token) &&
+        tokenStore.isValid(params.token, params.connectionId);
+    }
+    if (isReservedName(params.connectionId) || isReservedName(params.label)) return false;
     if (!isAuthEnabled()) return true;
-    return isAuthorizedToken(token, tokenStore);
+    return isAuthorizedToken(params.token, tokenStore, process.env, params.connectionId);
+  }
+
+  function boundIdentity(params: HandshakeParams) {
+    const id = params.connectionId?.trim();
+    return id ? tokenStore.getBoundIdentity(id) : undefined;
   }
 
   const server = new WebSocketServer({
@@ -158,7 +180,7 @@ export function createWSServer(options: WSServerOptions): WSServer {
         info.req.url || '/',
         info.req.headers.host || 'localhost',
       );
-      if (authorize(params.token)) return done(true);
+      if (authorize(params)) return done(true);
       logger.warn('Handshake rejected: missing or invalid token');
       return done(false, 401, 'unauthorized');
     },
@@ -175,17 +197,22 @@ export function createWSServer(options: WSServerOptions): WSServer {
 
     // Defense in depth: verifyClient already gated the upgrade, but a proxy that
     // replays or a future refactor must not turn the socket into a live session.
-    if (!authorize(params.token)) {
+    if (!authorize(params)) {
       logger.warn('Connection rejected: missing or invalid token');
       ws.close(4401, 'unauthorized');
       return;
     }
 
-    const connectionId = params.connectionId?.trim() || registry.nextAnonymousId();
+    let connectionId = params.connectionId?.trim();
+    if (!connectionId) {
+      do {
+        connectionId = registry.nextAnonymousId();
+      } while (isReservedName(connectionId) || registry.get(connectionId));
+    }
     const { added, replaced } = registry.add({
       connectionId,
       ws,
-      label: params.label?.trim() || undefined,
+      label: boundIdentity(params)?.label ?? (params.label?.trim() || undefined),
       ...getClientIpInfo(req, trustedProxyIps, process.env.BROWSER_TRUST_PROXY === 'true' && isAuthEnabled()),
       userAgent: req.headers['user-agent'],
     });
