@@ -171,6 +171,13 @@ describe('LAN provisioning', () => {
     expect(preflight.headers['access-control-allow-origin']).toBe(extension.origin);
   });
 
+  it('applies the setup body limit before the larger MCP body parser', async () => {
+    const reply = await start({ profile: 'x'.repeat(3_000) });
+    expect(reply.status).toBe(413);
+    expect(reply.json).toEqual({ error: 'Invalid setup request body' });
+    expect(reply.headers['cache-control']).toBe('no-store');
+  });
+
   it('lets the user correct invalid approval details and recovers one persisted credential set', async () => {
     const initial = await start({ connectionId: oldId });
     expect(initial.status).toBe(201);

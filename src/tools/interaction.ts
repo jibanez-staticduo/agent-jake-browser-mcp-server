@@ -35,6 +35,7 @@ export const clickTool: Tool = createTool({
     data => data.ref || data.selector,
     { message: 'Either ref or selector must be provided' }
   ),
+  requiredAnyOf: [['ref', 'selector']],
   async handle(context, params) {
     const response = await context.send('browser_click', {
       ref: params.ref,
@@ -82,6 +83,7 @@ export const typeTool: Tool = createTool({
     data => data.ref || data.selector,
     { message: 'Either ref or selector must be provided' }
   ),
+  requiredAnyOf: [['ref', 'selector']],
   async handle(context, params) {
     const response = await context.send('browser_type', {
       ref: params.ref,
@@ -116,6 +118,7 @@ export const hoverTool: Tool = createTool({
     data => data.ref || data.selector,
     { message: 'Either ref or selector must be provided' }
   ),
+  requiredAnyOf: [['ref', 'selector']],
   async handle(context, params) {
     const response = await context.send('browser_hover', {
       ref: params.ref,
@@ -148,6 +151,7 @@ export const dragTool: Tool = createTool({
     data => data.targetRef || data.targetSelector,
     { message: 'Target ref or selector must be provided' }
   ),
+  requiredAnyOf: [['sourceRef', 'sourceSelector'], ['targetRef', 'targetSelector']],
   async handle(context, params) {
     // The extension's wire format is start*/end* (see its schemas.ts); the MCP
     // surface keeps source*/target* so existing callers do not break.
@@ -185,6 +189,7 @@ export const selectOptionTool: Tool = createTool({
     data => data.value !== undefined || data.label !== undefined || data.index !== undefined,
     { message: 'One of value, label, or index must be provided' }
   ),
+  requiredAnyOf: [['ref', 'selector'], ['value', 'label', 'index']],
   async handle(context, params) {
     const response = await context.send('browser_select_option', {
       ref: params.ref,
@@ -243,6 +248,7 @@ export const uploadFileTool: Tool = createTool({
     data => data.filePath || data.filePaths?.length,
     { message: 'filePath or filePaths must be provided' }
   ),
+  requiredAnyOf: [['filePath', 'filePaths']],
   async handle(context, params) {
     const response = await context.send('browser_upload_file', {
       ref: params.ref,
@@ -318,6 +324,7 @@ export const dropTool: Tool = createTool({
     data: z.record(z.string(), z.string()).optional().describe('MIME type → value, e.g. {"text/plain": "hello"}'),
   }).refine(d => d.ref || d.selector, { message: 'Either ref or selector must be provided' })
     .refine(d => d.paths?.length || (d.data && Object.keys(d.data).length), { message: 'paths or data must be provided' }),
+  requiredAnyOf: [['ref', 'selector'], ['paths', 'data']],
   async handle(context, params) {
     let files: Array<{ name: string; mimeType: string; base64: string }> = [];
     try {
@@ -588,6 +595,7 @@ const saveSecret = createTool({
     data => data.ref || data.selector || data.regex,
     { message: 'ref, selector or regex must be provided' }
   ),
+  requiredAnyOf: [['ref', 'selector', 'regex']],
   async handle(context, params) {
     const { vault, item, field } = params.destination;
     try {
@@ -662,6 +670,7 @@ export const passkeyTool: Tool = createTool({
     data => data.ref || data.selector,
     { message: 'Either ref or selector must be provided' }
   ),
+  requiredAnyOf: [['ref', 'selector']],
   async handle(context, params) {
     const rpIds = params.source === '1password' ? onePasswordPasskeyRpIds() : [];
     if (params.source === '1password') {
