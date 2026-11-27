@@ -90,7 +90,7 @@ export const listTabsTool: Tool = createTool({
   name: 'browser_list_tabs',
   description: 'List all open browser tabs with their IDs, titles, and URLs.',
   schema: z.object({}),
-  annotations: { readOnlyHint: true, idempotentHint: true },
+  annotations: { readOnlyHint: true },
   async handle(context) {
     const response = await context.send('browser_list_tabs');
 
@@ -120,7 +120,7 @@ export const findTabTool: Tool = createTool({
     query: z.string().min(1).describe('Text to look for in the title or the URL of a tab'),
     limit: z.number().int().positive().max(50).optional().default(10).describe('How many matches to return (newest first)'),
   }),
-  annotations: { readOnlyHint: true, idempotentHint: true },
+  annotations: { readOnlyHint: true },
   async handle(context, params) {
     const response = await context.send('browser_find_tab', { query: params.query, limit: params.limit });
 

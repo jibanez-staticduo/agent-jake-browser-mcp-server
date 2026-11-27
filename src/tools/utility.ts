@@ -41,7 +41,7 @@ export const waitTool: Tool = createTool({
   schema: z.object({
     ms: z.number().min(0).max(30000).describe('Milliseconds to wait (max 30 seconds)'),
   }),
-  annotations: { readOnlyHint: true, idempotentHint: true },
+  annotations: { readOnlyHint: true },
   async handle(context, params) {
     const response = await context.send('browser_wait', { time: params.ms / 1000 });
 
@@ -245,6 +245,7 @@ export const networkRequestsTool: Tool = createTool({
     all: z.boolean().optional().default(false).describe('Include requests from before the last navigation'),
     filter: z.string().optional().describe('Case-insensitive regex on the URL'),
     filename: z.string().optional().describe('Write the output to this file instead of returning it'),
+    maxChars: MAX_CHARS_FIELD,
   }),
   annotations: { readOnlyHint: true },
   async handle(context, params) {
@@ -264,7 +265,7 @@ export const networkRequestsTool: Tool = createTool({
     }
     const lines = requests.map(r =>
       `[${r.index}] ${r.method} ${r.failure ? `FAILED(${r.failure})` : r.status ?? 'pending'} ${r.resourceType} ${redactNetworkUrl(r.url)}`);
-    return outputResult(lines.join('\n'), params.filename);
+    return outputResult(lines.join('\n'), params.filename, params.maxChars);
   },
 });
 
@@ -281,6 +282,7 @@ export const networkRequestTool: Tool = createTool({
       .describe('Only this part'),
     maxBodyChars: z.number().int().min(100).optional().default(20000).describe('Truncate bodies to this length'),
     filename: z.string().optional().describe('Write the output to this file instead of returning it'),
+    maxChars: MAX_CHARS_FIELD,
   }),
   annotations: { readOnlyHint: true },
   async handle(context, params) {
@@ -310,7 +312,7 @@ export const networkRequestTool: Tool = createTool({
       sections.push(`## response-headers\n${headers(r.responseHeaders)}`);
     }
     if (params.part === 'response-body' && 'responseBody' in r) sections.push(`## response-body\n${r.responseBody ?? '(no response)'}`);
-    return outputResult(sections.join('\n\n'), params.filename);
+    return outputResult(sections.join('\n\n'), params.filename, params.maxChars);
   },
 });
 
@@ -323,6 +325,7 @@ export const runCodeUnsafeTool: Tool = createTool({
   schema: z.object({
     code: z.string().describe('`async (page) => { ... }` or a function body'),
     filename: z.string().optional().describe('Write the output to this file instead of returning it'),
+    maxChars: MAX_CHARS_FIELD,
   }),
   annotations: { destructiveHint: true },
   async handle(context, params) {
@@ -348,7 +351,7 @@ export const runCodeUnsafeTool: Tool = createTool({
         : new Function('page', `return (async () => { ${src} })();`);
       const result = await fn(page);
       if (result === undefined) return textResult('(ok)');
-      return outputResult(typeof result === 'string' ? result : JSON.stringify(result, null, 2), params.filename);
+      return outputResult(typeof result === 'string' ? result : JSON.stringify(result, null, 2), params.filename, params.maxChars);
     } catch (error) {
       return errorResult(`run_code failed: ${(error as Error).message}`);
     }

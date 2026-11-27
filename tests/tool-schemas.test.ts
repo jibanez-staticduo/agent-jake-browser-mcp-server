@@ -120,15 +120,10 @@ describe('annotations', () => {
   it.each([
     'browser_state', 'browser_find', 'browser_snapshot', 'browser_get_text', 'browser_get_attribute',
     'browser_is_visible', 'browser_wait_for_element', 'browser_get_cookies', 'browser_list_tabs',
-    'browser_find_tab', 'browser_list_connections', 'browser_wait',
-  ])('%s is a repeatable read', (name) => {
-    expect(annotationsOf(name)).toMatchObject({ readOnlyHint: true, idempotentHint: true });
-  });
-
-  it.each([
-    'browser_get_html', 'browser_screenshot', 'browser_pdf', 'browser_network_requests',
+    'browser_find_tab', 'browser_list_connections', 'browser_wait', 'browser_get_html',
+    'browser_screenshot', 'browser_pdf', 'browser_network_requests',
     'browser_network_request',
-  ])('%s reads the page but may write its output, so a repeat is not a no-op', (name) => {
+  ])('%s declares read-only access', (name) => {
     const annotations = annotationsOf(name);
     expect(annotations.readOnlyHint).toBe(true);
     expect(annotations.idempotentHint).toBeUndefined();

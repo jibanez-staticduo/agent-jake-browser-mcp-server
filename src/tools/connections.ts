@@ -18,7 +18,7 @@ export const connectionsTools: Tool[] = [
     serverSide: true,
     // Built by hand rather than through `createTool`, so it states its own annotations: a listing
     // answered by this server touches no page and repeats without effect.
-    annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    annotations: { readOnlyHint: true, openWorldHint: false },
     handle: async (context) => {
       const connections = context.listConnections ? context.listConnections() : [];
       return textResult(JSON.stringify(connections, null, 2));

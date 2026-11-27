@@ -5,11 +5,13 @@
  * full: one call could take the whole context with it, and there was no way to ask for less or for the
  * file instead.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getConsoleLogsTool, getHtmlTool, evaluateTool } from '../src/tools/utility.ts';
+import {
+  evaluateTool, getConsoleLogsTool, getHtmlTool, networkRequestsTool, networkRequestTool, runCodeUnsafeTool,
+} from '../src/tools/utility.ts';
 import { getTextTool } from '../src/tools/queries.ts';
 import type { Context } from '../src/types.ts';
 
@@ -30,6 +32,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   rmSync(outDir, { recursive: true, force: true });
   if (previousOutDir === undefined) delete process.env.AGENT_BROWSER_OUT_DIR;
   else process.env.AGENT_BROWSER_OUT_DIR = previousOutDir;
@@ -71,11 +74,43 @@ describe('a result the caller can size', () => {
   });
 
   it('advertises the two arguments on the tools that return a large result', () => {
-    for (const tool of [getHtmlTool, getTextTool, evaluateTool]) {
+    for (const tool of [getHtmlTool, getTextTool, evaluateTool, networkRequestsTool, networkRequestTool, runCodeUnsafeTool]) {
       const properties = tool.schema.inputSchema.properties as Record<string, unknown>;
       expect(properties, tool.schema.name).toHaveProperty('filename');
       expect(properties, tool.schema.name).toHaveProperty('maxChars');
     }
+  });
+});
+
+describe('network and server-side code output', () => {
+  const requests = Array.from({ length: 6000 }, (_, index) => ({
+    index, method: 'GET', url: 'https://example.test', resourceType: 'XHR', status: 200, failure: null,
+  }));
+  const networkList = requests.map(({ index }) => `[${index}] GET 200 XHR https://example.test`).join('\n');
+  const longResult = 'a'.repeat(250_000);
+
+  it.each([
+    { tool: networkRequestsTool, reply: { requests }, args: {}, formatted: networkList },
+    {
+      tool: networkRequestTool,
+      reply: { responseBody: longResult },
+      args: { index: 1, part: 'response-body', maxBodyChars: longResult.length },
+      formatted: `## response-body\n${longResult}`,
+    },
+    { tool: runCodeUnsafeTool, reply: longResult, args: { code: 'return await page.evaluate("fixture")' }, formatted: longResult },
+  ])('$tool.schema.name honors the default, an explicit limit, and an unlimited inline result', async ({ tool, reply, args, formatted }) => {
+    if (tool === runCodeUnsafeTool) vi.stubEnv('AGENT_BROWSER_ALLOW_UNSAFE_CODE', '1');
+    const send = vi.fn(async () => ({ id: '1', success: true, result: reply }));
+    const context = { send } as unknown as Context;
+
+    expect(textOf(await tool.handle(context, args))).toContain(`showing 200000 of ${formatted.length} chars`);
+    const shorter = textOf(await tool.handle(context, { ...args, maxChars: 10 }));
+    expect(shorter.slice(0, 12)).toBe(`${formatted.slice(0, 10)}\n\n`);
+    expect(shorter).toContain(`showing 10 of ${formatted.length} chars`);
+    expect(textOf(await tool.handle(context, { ...args, maxChars: 0 }))).toBe(formatted);
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(send.mock.calls[0]).toEqual(send.mock.calls[1]);
+    expect(send.mock.calls[0]).toEqual(send.mock.calls[2]);
   });
 });
 
