@@ -6,10 +6,10 @@
  * file instead.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getHtmlTool, evaluateTool } from '../src/tools/utility.ts';
+import { getConsoleLogsTool, getHtmlTool, evaluateTool } from '../src/tools/utility.ts';
 import { getTextTool } from '../src/tools/queries.ts';
 import type { Context } from '../src/types.ts';
 
@@ -76,5 +76,61 @@ describe('a result the caller can size', () => {
       expect(properties, tool.schema.name).toHaveProperty('filename');
       expect(properties, tool.schema.name).toHaveProperty('maxChars');
     }
+  });
+});
+
+describe('console output', () => {
+  const logs = [
+    { type: 'log', text: 'a'.repeat(250_000), timestamp: 0 },
+    { type: 'info', text: 'last line', timestamp: 0 },
+  ];
+  const formatted = logs.map(log => `[1970-01-01T00:00:00.000Z] [${log.type.toUpperCase()}] ${log.text}`).join('\n');
+
+  /** Model the extension's single read-and-clear call. */
+  function consoleContext(): Context {
+    let captured = logs;
+    return {
+      async send(_type: string, payload: { clear?: boolean }) {
+        const result = { logs: captured };
+        if (payload.clear) captured = [];
+        return { id: '1', success: true, result };
+      },
+    } as unknown as Context;
+  }
+
+  it('caps ordinary console reads by default and allows the caller to ask for the rest', async () => {
+    const context = consoleContext();
+    const capped = textOf(await getConsoleLogsTool.handle(context, {}));
+    expect(capped).toContain(`showing 200000 of ${formatted.length} chars`);
+    expect(capped).not.toContain('last line');
+    const shorter = textOf(await getConsoleLogsTool.handle(context, { maxChars: 10 }));
+    expect(shorter).toContain(`showing 10 of ${formatted.length} chars`);
+    expect(textOf(await getConsoleLogsTool.handle(context, { maxChars: 0 }))).toBe(formatted);
+  });
+
+  it('returns every retrieved line when clearing, regardless of the inline limit', async () => {
+    const context = consoleContext();
+    const result = await getConsoleLogsTool.handle(context, { clear: true, maxChars: 10 });
+    expect(textOf(result)).toBe(formatted);
+    expect(textOf(await getConsoleLogsTool.handle(context, {}))).toBe('No console logs found');
+  });
+
+  it('writes the complete result to a file when clearing with a filename', async () => {
+    const context = consoleContext();
+    const result = await getConsoleLogsTool.handle(context, { clear: true, filename: 'console.txt', maxChars: 10 });
+    expect(textOf(result)).toContain(`Saved to ${join(outDir, 'console.txt')}`);
+    expect(readFileSync(join(outDir, 'console.txt'), 'utf-8')).toBe(formatted);
+  });
+
+  it('includes every cleared line in the response if the file cannot be written', async () => {
+    const filename = 'console.txt';
+    writeFileSync(join(outDir, filename), 'existing file');
+    const context = consoleContext();
+    const result = await getConsoleLogsTool.handle(context, { clear: true, filename });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('Cannot save output');
+    expect(result.content[1]).toEqual({ type: 'text', text: formatted });
+    expect(readFileSync(join(outDir, filename), 'utf-8')).toBe('existing file');
+    expect(textOf(await getConsoleLogsTool.handle(context, {}))).toBe('No console logs found');
   });
 });

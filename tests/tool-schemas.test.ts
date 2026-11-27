@@ -134,17 +134,17 @@ describe('annotations', () => {
     expect(annotations.idempotentHint).toBeUndefined();
   });
 
-  it.each(['browser_close_tab', 'browser_run_code_unsafe'])('%s is destructive', (name) => {
+  it.each(['browser_close_tab', 'browser_run_code_unsafe'])('%s declares destructive updates explicitly', (name) => {
     expect(annotationsOf(name).destructiveHint).toBe(true);
   });
 
-  it('claims nothing about tools that change the page', () => {
-    for (const name of ['browser_click', 'browser_type', 'browser_navigate', 'browser_reload',
-      'browser_new_tab', 'browser_switch_tab', 'browser_drop', 'browser_highlight']) {
-      const annotations = annotationsOf(name);
-      expect(annotations.readOnlyHint, name).toBe(false);
-      expect(annotations.destructiveHint, name).toBe(false);
-    }
+  it.each([
+    'browser_click', 'browser_type', 'browser_navigate', 'browser_reload', 'browser_new_tab',
+    'browser_switch_tab', 'browser_drop', 'browser_highlight', 'browser_evaluate', 'browser_get_console_logs',
+  ])('%s uses the conservative MCP defaults', (name) => {
+    const annotations = annotationsOf(name);
+    expect(annotations.readOnlyHint).toBe(false);
+    expect(annotations.destructiveHint).toBeUndefined();
   });
 
   it('opens the world only for a tool that reaches a browser', () => {

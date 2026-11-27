@@ -123,8 +123,9 @@ export const getConsoleLogsTool: Tool = createTool({
     clear: z.boolean()
       .optional()
       .default(false)
-      .describe('Clear logs after retrieving'),
-    filename: z.string().optional().describe('Write the output to this file instead of returning it'),
+      .describe('Clear logs after retrieving. The complete output is saved to filename or returned inline if no file is written'),
+    filename: FILENAME_FIELD,
+    maxChars: MAX_CHARS_FIELD.describe(`${MAX_CHARS_FIELD.description}. Also ignored when clear is true`),
   }),
   async handle(context, params) {
     const response = await context.send('browser_get_console_logs', {
@@ -151,7 +152,12 @@ export const getConsoleLogsTool: Tool = createTool({
       return `[${time}] [${log.type.toUpperCase()}] ${log.text}${log.location ? `  @ ${log.location}` : ''}`;
     }).join('\n');
 
-    return outputResult(formatted, params.filename);
+    const result = await outputResult(formatted, params.filename, params.clear ? 0 : params.maxChars);
+    if (params.clear && result.isError) {
+      // The extension has already cleared the buffer, so return the retrieved logs with the error.
+      result.content.push({ type: 'text', text: formatted });
+    }
+    return result;
   },
 });
 

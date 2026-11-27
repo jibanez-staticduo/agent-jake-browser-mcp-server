@@ -23,9 +23,8 @@ export function createTool<T extends z.ZodType>(options: {
    */
   requiredAnyOf?: string[][];
   /**
-   * MCP annotations. What is not given stays conservative: nothing is advertised as read-only
-   * or idempotent unless the tool truly is, and a browser tool is always open-world because it
-   * acts on a page outside this process.
+   * MCP annotations. Omitted hints use the protocol defaults, including potentially destructive
+   * updates. Browser tools are open-world because they act on a page outside this process.
    */
   annotations?: ToolAnnotations;
   handle: (context: Context, params: z.infer<T>) => Promise<ToolResult>;
@@ -56,7 +55,6 @@ export function createTool<T extends z.ZodType>(options: {
     inputSchema,
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false,
       openWorldHint: !serverSide,
       ...annotations,
     },
