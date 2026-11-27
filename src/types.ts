@@ -124,10 +124,23 @@ export interface BrowserConnectionInfo {
 /**
  * Tool schema for MCP registration.
  */
+/**
+ * MCP tool annotations: what a client may assume before it calls. They are hints, and the
+ * defaults in `createTool` are the conservative ones — a tool says `readOnlyHint` or `idempotentHint`
+ * only when it really does nothing else.
+ */
+export interface ToolAnnotations {
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
 export interface ToolSchema {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  annotations?: ToolAnnotations;
 }
 
 /**

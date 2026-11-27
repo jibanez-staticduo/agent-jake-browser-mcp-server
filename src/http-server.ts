@@ -50,7 +50,9 @@ function openConnections() {
 }
 
 const app = express();
-app.use(express.json());
+// Bounded body: a get_html/evaluate result posted back by a client must not be rejected at the
+// default 100 kB, and an unbounded body would let one caller hold the whole process memory.
+app.use(express.json({ limit: '2mb' }));
 
 const transports = new Map();
 const servers = new Map();
@@ -204,9 +206,16 @@ function createMcpServer() {
     tools: toolsListPayload(),
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra) =>
-    callTool(request.params.name, request.params.arguments, extra?.sessionId),
-  );
+  // A tool that throws is a failed action, not a broken protocol: report it as `isError` content so
+  // clients see a tool result instead of a JSON-RPC -32603 they cannot tell apart from a server bug.
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    try {
+      return await callTool(request.params.name, request.params.arguments, extra?.sessionId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return textContent(message, true);
+    }
+  });
 
   return server;
 }
@@ -708,6 +717,28 @@ const PAIR_HTML = `<!doctype html>
 </script>
 </body>
 </html>`;
+
+/**
+ * Body-parsing failures reach the MCP endpoint as express errors, which would otherwise answer with
+ * an HTML error page a JSON-RPC client cannot parse. Keep the protocol shape for both cases.
+ */
+app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err?.type === 'entity.too.large') {
+    return res.status(413).json({
+      jsonrpc: '2.0',
+      id: null,
+      error: { code: -32600, message: 'Request body too large (limit 2 MB).' },
+    });
+  }
+  if (err instanceof SyntaxError && 'body' in err) {
+    return res.status(400).json({
+      jsonrpc: '2.0',
+      id: null,
+      error: { code: -32700, message: 'Parse error: request body is not valid JSON.' },
+    });
+  }
+  return next(err);
+});
 
 // SECURITY: the MCP endpoint has no auth of its own, so it binds to loopback
 // only. Remote use goes through an ssh tunnel or a reverse proxy that adds the

@@ -12,7 +12,34 @@ import { logger } from './utils/logger.js';
 import { getSharedTokenStore, type TokenStore } from './token-store.js';
 import { getClientIpInfo, parseTrustedProxyIps } from './client-ip.js';
 import { ConnectionRegistry, type ManagedConnection } from './connection-registry.js';
-import type { BrowserConnectionInfo, ExtensionMessage, ExtensionResponse } from './types.js';
+import type { BrowserConnectionInfo, ExtensionMessage, ExtensionResponse, ToolName } from './types.js';
+
+/** How long the extension gets to answer a command that does not wait by itself. */
+export const WS_DEFAULT_TIMEOUT_MS = 30_000;
+
+/**
+ * Per-command answers, for the commands whose own argument may be as long as the default.
+ *
+ * `browser_wait` accepts 30 s and the socket gave up at exactly 30 s: a legitimate full-length wait
+ * came back as `Request timed out: browser_wait`, and the released exclusivity made the browser look
+ * idle while it was still busy. Each entry sits above the maximum its tool accepts, so the tool's own
+ * answer always arrives first and says what happened.
+ */
+export const WS_MESSAGE_TIMEOUT_MS: Partial<Record<ToolName, number>> = {
+  // A 30 s sleep, or a 30 s element wait, needs room to answer rather than time out.
+  browser_wait: 35_000,
+  browser_wait_for_element: 35_000,
+  // These wait for a navigation on top of their own timeout argument.
+  browser_iframe_click: 40_000,
+  browser_new_tab: 40_000,
+  // The passkey ceremony waits up to 20 s for the site and then talks to an authenticator.
+  browser_passkey: 45_000,
+};
+
+/** The answer window for one message type. */
+export function wsTimeoutFor(type: ToolName): number {
+  return WS_MESSAGE_TIMEOUT_MS[type] ?? WS_DEFAULT_TIMEOUT_MS;
+}
 
 export interface WSServerOptions {
   port: number;
@@ -35,7 +62,11 @@ export interface WSServer {
   getConnection(connectionId?: string): WebSocket | null;
   listConnectionInfos(): BrowserConnectionInfo[];
   /** Send and await the extension response, targeting one connection. */
-  sendTo(connectionId: string | undefined, message: ExtensionMessage): Promise<ExtensionResponse>;
+  sendTo(
+    connectionId: string | undefined,
+    message: ExtensionMessage,
+    timeoutMs?: number,
+  ): Promise<ExtensionResponse>;
   /** Back-compatible alias used by the stdio path. */
   send(message: ExtensionMessage, connectionId?: string): Promise<ExtensionResponse>;
   close(): Promise<void>;
@@ -266,6 +297,7 @@ export function createWSServer(options: WSServerOptions): WSServer {
   function sendTo(
     connectionId: string | undefined,
     message: ExtensionMessage,
+    timeoutMs = wsTimeoutFor(message.type),
   ): Promise<ExtensionResponse> {
     return new Promise((resolve, reject) => {
       const target = targetSocket(connectionId);
@@ -286,7 +318,7 @@ export function createWSServer(options: WSServerOptions): WSServer {
         logger.error(`[WS] TIMEOUT for id: ${message.id}, type: ${message.type}`);
         pendingRequests.delete(message.id);
         reject(new Error(`Request timed out: ${message.type}`));
-      }, 30000);
+      }, timeoutMs);
 
       pendingRequests.set(message.id, { connectionId: target.connectionId, ws: target.ws, resolve, reject, timeout });
       registry.markUsed(target.connectionId);
