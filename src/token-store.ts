@@ -6,7 +6,7 @@
  * makes the tokens survive a container restart.
  */
 import { randomBytes } from 'crypto';
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, rmSync } from 'fs';
 import { dirname } from 'path';
 import { logger } from './utils/logger.js';
 
@@ -15,6 +15,7 @@ export interface TokenRecord {
   createdAt: string;
   label?: string;
   connectionId?: string;
+  bound?: true;
 }
 
 export interface TokenStore {
@@ -23,9 +24,12 @@ export interface TokenStore {
   load(): TokenRecord[];
   /** Generate a new random token and persist it. */
   issueToken(meta?: { label?: string; connectionId?: string }): string;
+  issueBoundToken(identity: { label: string; connectionId: string }): string;
   /** Register an existing token (idempotent). Returns false when already present. */
   addToken(token: string, meta?: { label?: string; connectionId?: string }): boolean;
-  isValid(token: string): boolean;
+  isValid(token: string, connectionId?: string | null): boolean;
+  getBoundIdentity(connectionId: string): { token: string; label: string } | undefined;
+  isBoundLabel(label: string): boolean;
   list(): TokenRecord[];
 }
 
@@ -57,6 +61,7 @@ export function createTokenStore(
             createdAt: typeof record.createdAt === 'string' ? record.createdAt : new Date().toISOString(),
             ...(typeof record.label === 'string' ? { label: record.label } : {}),
             ...(typeof record.connectionId === 'string' ? { connectionId: record.connectionId } : {}),
+            ...(record.bound === true ? { bound: true as const } : {}),
           });
         }
       }
@@ -77,6 +82,26 @@ export function createTokenStore(
     }
   }
 
+  function issueBoundToken(identity: { label: string; connectionId: string }): string {
+    const token = randomBytes(32).toString('hex');
+    const record: TokenRecord = { token, createdAt: new Date().toISOString(), ...identity, bound: true };
+    const pending = `${filePath}.${randomBytes(8).toString('hex')}.tmp`;
+    mkdirSync(dirname(filePath), { recursive: true });
+    try {
+      writeFileSync(pending, `${JSON.stringify({ tokens: [...records, record] }, null, 2)}\n`, {
+        encoding: 'utf-8',
+        mode: 0o600,
+        flag: 'wx',
+        flush: true,
+      });
+      renameSync(pending, filePath);
+    } finally {
+      rmSync(pending, { force: true });
+    }
+    records.push(record);
+    return token;
+  }
+
   // Read the backing file up front: tokens must survive a container restart
   // without every caller remembering to call load().
   load();
@@ -84,6 +109,7 @@ export function createTokenStore(
   return {
     filePath,
     load,
+    issueBoundToken,
     issueToken(meta) {
       const token = randomBytes(32).toString('hex');
       records.push({
@@ -106,9 +132,18 @@ export function createTokenStore(
       persist();
       return true;
     },
-    isValid(token) {
+    isValid(token, connectionId) {
       if (!token) return false;
-      return records.some((r) => r.token === token);
+      const record = records.find((item) => item.token === token);
+      if (!record || !record.bound) return !!record;
+      return !!record.connectionId && !!record.label && record.connectionId === connectionId;
+    },
+    getBoundIdentity(connectionId) {
+      const record = records.find((item) => item.bound && item.connectionId?.toLowerCase() === connectionId.toLowerCase());
+      return record?.label ? { token: record.token, label: record.label } : undefined;
+    },
+    isBoundLabel(label) {
+      return records.some((item) => item.bound && item.label?.toLowerCase() === label.toLowerCase());
     },
     list() {
       return records.map((r) => ({ ...r }));

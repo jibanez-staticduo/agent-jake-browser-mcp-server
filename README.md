@@ -130,6 +130,7 @@ also works while nothing is connected.
 | `BROWSER_PUBLIC_ORIGIN` | derived | Origin used to build the approval link returned by `/pair/start` and the one baked into `/install`. Set it when the proxy host is not derivable from the request. |
 | `AGENT_BROWSER_OUT_DIR` | system temp dir | Where `browser_pdf` and tool results saved with `filename` write their files. |
 | `AGENT_BROWSER_INSTALL_INSTANCE` | unset (legacy root) | Optional strict instance id `nas`, `fedora`, or `ari`. Initial downloads and `/install` target `$HOME/Downloads/agent-jake-browser/<id>` and embed the id in `config.json`. Invalid non-empty values fail closed. |
+| `AGENT_BROWSER_SETUP_FILE` | unset | Path to the private per-instance JSON file that enables [LAN setup](docs/lan-setup.md). |
 | `AGENT_BROWSER_DROP_DIR` | unset (file drops disabled) | Directory of files available to `browser_drop`. Files must be direct children, with no symlinks; maximum 8 files and 10 MiB total per call. Mount only files intended for browser upload. MIME data-only drops remain available with a 1 MiB limit. |
 | `AGENT_BROWSER_ALLOW_UNSAFE_CODE` | unset (disabled) | Set exactly `1` to enable `browser_run_code_unsafe`, which executes arbitrary JavaScript in the MCP server process. Only use it with fully trusted MCP clients. |
 | `AGENT_BROWSER_CONNECTION_LABELS` | unset | JSON map of `connectionId` to a friendly name (e.g. `{"259bc…":"mac"}`), so an MCP session can pick a paired browser by `id` or `name` instead of the global most-recently-used. |

@@ -1,12 +1,13 @@
 // @ts-nocheck
 import express from 'express';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { createReadStream, readFileSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
 import { createContext } from './context.js';
 import { getAllTools } from './tools/index.js';
 import { getSharedTokenStore } from './token-store.js';
@@ -17,6 +18,10 @@ import { installerScript } from './installer.js';
 import { parseLabels, nameOf, resolveTarget, findConnection } from './connection-target.js';
 import { createTabReaper, idleMinutesFromEnv } from './tab-reaper.js';
 import { createSessionTabs, acceptsExplicitTab } from './session-tabs.js';
+import { readSetupConfig, setupClientIp, setupField, singleHeader } from './setup-config.js';
+import { setupPage } from './setup-page.js';
+import { createSetupStore } from './setup-store.js';
+import { isAuthEnabled } from './ws-server.js';
 
 const PORT = Number(process.env.MCP_HTTP_PORT || 8000);
 const WS_PORT = Number(process.env.BROWSER_WS_PORT || 8765);
@@ -27,6 +32,7 @@ const WS_PATH = process.env.BROWSER_WS_PATH || '/';
 const INSTALL_INSTANCE_VALUES = new Set(['nas', 'fedora', 'ari']);
 const INSTALL_INSTANCE_RAW = process.env.AGENT_BROWSER_INSTALL_INSTANCE || '';
 const INSTALL_INSTANCE = INSTALL_INSTANCE_RAW ? INSTALL_INSTANCE_RAW : undefined;
+const setupConfig = readSetupConfig(process.env.AGENT_BROWSER_SETUP_FILE);
 
 const TAB_FIELD = {
   type: 'integer',
@@ -50,12 +56,13 @@ function openConnections() {
 }
 
 const app = express();
+const tokenStore = getSharedTokenStore();
+installSetupRoutes();
 app.use(express.json());
 
 const transports = new Map();
 const servers = new Map();
 const context = createContext({ port: WS_PORT });
-const tokenStore = getSharedTokenStore();
 const allTools = getAllTools();
 const toolMap = new Map(allTools.map((tool) => [tool.schema.name, tool]));
 
@@ -215,6 +222,99 @@ function listToolsResult() {
   return { jsonrpc: '2.0', id: null, result: { tools: toolsListPayload() } };
 }
 
+function installSetupRoutes() {
+  const router = express.Router({ caseSensitive: true, strict: true });
+  const store = setupConfig && createSetupStore(setupConfig.settings, tokenStore.issueBoundToken, { isLabelTaken });
+  // Match all casings and suffixes at the boundary, even for unavailable endpoints.
+  app.use('/setup', (req, res, next) => {
+    res.set({
+      'Cache-Control': 'no-store',
+      'Referrer-Policy': 'no-referrer',
+      'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'DENY',
+      'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+    });
+    if (!setupConfig || !/^\/setup(?:\/|$)/.test(req.originalUrl.split('?')[0])) return res.sendStatus(404);
+    const ip = setupClientIp(req, setupConfig);
+    if (!ip) return res.sendStatus(403);
+    res.locals.setupClientIp = ip;
+    next();
+  }, router);
+  if (!store) return;
+  app.use('/pair', (_req, res) => res.set('Cache-Control', 'no-store').sendStatus(404));
+
+  function isLabelTaken(label) {
+    const wanted = label.toLowerCase();
+    const matches = (value) => value?.toLowerCase() === wanted;
+    return matches(DEFAULT_CONNECTION) ||
+      Object.entries(CONNECTION_LABELS).some(([id, alias]) => matches(id) || matches(alias)) ||
+      tokenStore.list().some((item) => matches(item.connectionId) || matches(item.label)) ||
+      context.listConnections().some((item) => matches(item.connectionId) || matches(item.label));
+  }
+
+  const parseJson = express.json({ limit: '2kb', inflate: false });
+  const code = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+  const identity = { host: setupField.optional(), profile: setupField.optional() };
+  const start = z.strictObject({ connectionId: z.uuid().optional(), ...identity });
+  const approve = z.strictObject({ code, ...identity });
+  const status = z.strictObject({ pollSecret: code });
+
+  function extensionRequest(req, res, next) {
+    if (!/^chrome-extension:\/\/[a-p]{32}$/.test(singleHeader(req, 'origin') || '')) {
+      return res.sendStatus(403);
+    }
+    cors(req, res, next);
+  }
+
+  function requireJson(req, res, next) {
+    if (!req.is('application/json')) return res.status(415).json({ error: 'Expected application/json' });
+    parseJson(req, res, (err) => {
+      if (!err) return next();
+      return res.status(err.status || 400).json({ error: 'Invalid setup request body' });
+    });
+  }
+
+  router.get('/', (req, res) => {
+    const site = singleHeader(req, 'sec-fetch-site');
+    if ((site !== 'none' && site !== 'same-origin') ||
+        singleHeader(req, 'sec-fetch-mode') !== 'navigate' ||
+        singleHeader(req, 'sec-fetch-dest') !== 'document') return res.sendStatus(403);
+    const nonce = randomBytes(16).toString('base64');
+    res.set('Content-Security-Policy',
+      `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`);
+    res.type('html').send(setupPage(nonce));
+  });
+  router.options(['/start', '/status'], extensionRequest);
+  router.post('/start', extensionRequest, requireJson, (req, res) => {
+    const parsed = start.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: 'Invalid setup identity' });
+    const host = parsed.data.host ?? setupConfig.hosts.get(res.locals.setupClientIp);
+    const exchange = store.start({ host, profile: parsed.data.profile });
+    return exchange ? res.status(201).json(exchange) : res.status(429).json({ error: 'Too many pending setup requests' });
+  });
+  router.post('/approve', (req, res, next) => {
+    if (singleHeader(req, 'origin') !== setupConfig.origin || singleHeader(req, 'sec-fetch-site') !== 'same-origin') {
+      return res.sendStatus(403);
+    }
+    next();
+  }, requireJson, (req, res) => {
+    const parsed = approve.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: 'Invalid setup approval' });
+    const result = store.approve(parsed.data.code, parsed.data);
+    const httpStatus = result.state === 'pending' ? 422 : result.state === 'expired' ? 410 : 200;
+    return res.status(httpStatus).json(result);
+  });
+  router.post('/status', extensionRequest, requireJson, (req, res) => {
+    const parsed = status.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: 'Invalid setup poll secret' });
+    try {
+      return res.json(store.status(parsed.data.pollSecret));
+    } catch {
+      return res.status(503).json({ error: 'Pairing token temporarily unavailable' });
+    }
+  });
+}
+
 /**
  * The extension polls pairing from a chrome-extension origin. The approval page
  * is same-origin and must not expose its token response to arbitrary websites.
@@ -280,8 +380,7 @@ app.get('/healthz', (_req, res) => {
 app.get('/connections', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.json({
-    authEnabled:
-      (process.env.BROWSER_WS_TOKEN || '') !== '' || process.env.BROWSER_ALLOW_PAIRING === 'true',
+    authEnabled: isAuthEnabled(),
     wsUrl: publicWsUrl(req),
     connections: context.listConnections(),
   });
@@ -398,7 +497,8 @@ app.get('/install', (req, res) => {
 
 app.get('/', (_req, res) => {
   res.setHeader('Cache-Control', 'public, max-age=60');
-  res.type('html').send(INDEX_HTML);
+  res.type('html').send(INDEX_HTML.replace('<!-- pairing-link -->',
+    setupConfig ? '' : '<li><a href="/pair">Aprobar un código de pairing</a></li>'));
 });
 
 app.get('/pair', (_req, res) => {
@@ -580,8 +680,8 @@ const INDEX_HTML = `<!doctype html>
 <p class="muted">Servidor MCP que pilota los navegadores conectados por extensión.</p>
 <ul>
   <li>Instalador firmado: <code>curl -fsSL <span class="origin"></span>/install | bash</code></li>
-  <li><a href="/download">Descargar la extensión</a> (zip con esta URL y token embebidos si usas el flujo de pairing)</li>
-  <li><a href="/pair">Aprobar un código de pairing</a></li>
+  <li><a href="/download">Descargar la extensión</a></li>
+  <!-- pairing-link -->
   <li><code>/mcp</code> — endpoint MCP (streamable HTTP)</li>
 </ul>
 <h2>Conexiones ahora mismo</h2>

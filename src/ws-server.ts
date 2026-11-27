@@ -42,11 +42,11 @@ export interface WSServer {
 }
 
 /**
- * Auth is on when a static token is configured or pairing tokens are accepted.
+ * Auth is on when a static token, LAN setup or manual pairing is configured.
  * With neither, the socket stays open (LAN / ssh-tunnel compatibility).
  */
 export function isAuthEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return (env.BROWSER_WS_TOKEN || '') !== '' || env.BROWSER_ALLOW_PAIRING === 'true';
+  return !!(env.BROWSER_WS_TOKEN || env.AGENT_BROWSER_SETUP_FILE?.trim()) || env.BROWSER_ALLOW_PAIRING === 'true';
 }
 
 export function parseHandshakeParams(reqUrl: string, hostHeader?: string): HandshakeParams {
@@ -74,11 +74,12 @@ export function isAuthorizedToken(
   token: string | null,
   tokenStore: TokenStore,
   env: NodeJS.ProcessEnv = process.env,
+  connectionId?: string | null,
 ): boolean {
   if (!token) return false;
   const staticToken = env.BROWSER_WS_TOKEN || '';
   if (staticToken && safeEqual(token, staticToken)) return true;
-  return tokenStore.isValid(token);
+  return tokenStore.isValid(token, connectionId);
 }
 
 /**
@@ -112,9 +113,20 @@ export function createWSServer(options: WSServerOptions): WSServer {
   // by the pairing page) is required whenever auth is enabled.
   const host = options.host || process.env.BROWSER_WS_HOST || '127.0.0.1';
 
-  function authorize(token: string | null): boolean {
+  function authorize(params: HandshakeParams): boolean {
+    const identity = boundIdentity(params);
+    if (identity) {
+      return !!params.token && safeEqual(identity.token, params.token) &&
+        tokenStore.isValid(params.token, params.connectionId);
+    }
+    if (params.label && tokenStore.isBoundLabel(params.label.trim())) return false;
     if (!isAuthEnabled()) return true;
-    return isAuthorizedToken(token, tokenStore);
+    return isAuthorizedToken(params.token, tokenStore, process.env, params.connectionId);
+  }
+
+  function boundIdentity(params: HandshakeParams) {
+    const id = params.connectionId?.trim();
+    return id ? tokenStore.getBoundIdentity(id) : undefined;
   }
 
   const server = new WebSocketServer({
@@ -127,7 +139,7 @@ export function createWSServer(options: WSServerOptions): WSServer {
         info.req.url || '/',
         info.req.headers.host || 'localhost',
       );
-      if (authorize(params.token)) return done(true);
+      if (authorize(params)) return done(true);
       logger.warn('Handshake rejected: missing or invalid token');
       return done(false, 401, 'unauthorized');
     },
@@ -144,7 +156,7 @@ export function createWSServer(options: WSServerOptions): WSServer {
 
     // Defense in depth: verifyClient already gated the upgrade, but a proxy that
     // replays or a future refactor must not turn the socket into a live session.
-    if (!authorize(params.token)) {
+    if (!authorize(params)) {
       logger.warn('Connection rejected: missing or invalid token');
       ws.close(4401, 'unauthorized');
       return;
@@ -154,7 +166,7 @@ export function createWSServer(options: WSServerOptions): WSServer {
     const { added, replaced } = registry.add({
       connectionId,
       ws,
-      label: params.label?.trim() || undefined,
+      label: boundIdentity(params)?.label ?? (params.label?.trim() || undefined),
       ...getClientIpInfo(req, trustedProxyIps, process.env.BROWSER_TRUST_PROXY === 'true' && isAuthEnabled()),
       userAgent: req.headers['user-agent'],
     });
