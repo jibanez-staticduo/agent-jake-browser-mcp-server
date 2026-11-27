@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { normalizeConnectionName } from './connection-target.js';
 
 export interface SetupIdentity {
   host?: string;
@@ -15,16 +16,25 @@ export interface SetupSettings {
 
 type Field = 'host' | 'profile';
 type ApprovedIdentity = { connectionId: string; label: string };
+type SetupResult = SetupSettings & ApprovedIdentity & { token: string };
 type SetupRecord = SetupIdentity & {
   pollSecret: string;
   expiresAt: number;
   approved?: ApprovedIdentity;
+  delivery?: SetupResult;
 };
 
 export function createSetupStore(
   settings: SetupSettings,
   issueToken: (identity: ApprovedIdentity) => string,
-  { now = Date.now, ttlMs = 5 * 60_000, capacity = 256, isLabelTaken = (_label: string) => false } = {},
+  {
+    now = Date.now,
+    ttlMs = 5 * 60_000,
+    capacity = 256,
+    isNameTaken = (_name: string) => false,
+    checkApproval = () => {},
+    isTokenValid = (_config: SetupResult) => true,
+  } = {},
 ) {
   const records = new Map<string, SetupRecord>();
   const codesBySecret = new Map<string, string>();
@@ -41,7 +51,17 @@ export function createSetupStore(
     }
   }
 
+  function isReserved(name: string): boolean {
+    const wanted = normalizeConnectionName(name);
+    return [...records.values()].some(({ approved }) => approved &&
+      (normalizeConnectionName(approved.connectionId) === wanted || normalizeConnectionName(approved.label) === wanted));
+  }
+
   return {
+    isReserved(name: string) {
+      prune();
+      return isReserved(name);
+    },
     start(identity: SetupIdentity) {
       prune();
       if (records.size >= capacity) return null;
@@ -54,7 +74,7 @@ export function createSetupStore(
     approve(code: string, supplied: Partial<Record<Field, string>>) {
       prune();
       const record = records.get(code);
-      if (!record) return { state: 'expired' } as const;
+      if (!record || record.delivery) return { state: 'expired' } as const;
       if (record.approved) return { state: 'approved' } as const;
       const host = record.host ?? supplied.host;
       const profile = record.profile ?? supplied.profile;
@@ -65,12 +85,17 @@ export function createSetupStore(
         return { state: 'pending', missing } as const;
       }
       const label = `${host} - ${profile}`;
-      if (isLabelTaken(label) || [...records.values()].some((entry) => entry.approved?.label.toLowerCase() === label.toLowerCase())) {
+      if (isNameTaken(label) || isReserved(label)) {
         record.host = host;
         delete record.profile;
         return { state: 'pending', missing: ['profile'] as Field[], conflict: true } as const;
       }
-      record.approved = { connectionId: randomUUID(), label };
+      checkApproval();
+      let connectionId: string;
+      do {
+        connectionId = randomUUID();
+      } while (isNameTaken(connectionId) || isReserved(connectionId));
+      record.approved = { connectionId, label };
       return { state: 'approved' } as const;
     },
     status(pollSecret: string) {
@@ -79,14 +104,19 @@ export function createSetupStore(
       const record = code && records.get(code);
       if (!code || !record) return { state: 'expired' } as const;
       if (!record.approved) return { state: 'pending' } as const;
-      if (isLabelTaken(record.approved.label)) {
+      if (record.delivery) {
+        if (isTokenValid(record.delivery)) return { state: 'approved', config: record.delivery } as const;
         remove(code, record);
         return { state: 'expired' } as const;
       }
-      // No await between issuance and removal. If persistence throws, the same poll can retry.
+      if (isNameTaken(record.approved.label) || isNameTaken(record.approved.connectionId)) {
+        remove(code, record);
+        return { state: 'expired' } as const;
+      }
+      // Persist once before returning. If persistence throws, the same poll can retry.
       const token = issueToken(record.approved);
-      remove(code, record);
-      return { state: 'approved', config: { ...settings, ...record.approved, token } } as const;
+      record.delivery = { ...settings, ...record.approved, token };
+      return { state: 'approved', config: record.delivery } as const;
     },
   };
 }

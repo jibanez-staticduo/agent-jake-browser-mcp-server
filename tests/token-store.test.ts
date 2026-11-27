@@ -1,8 +1,8 @@
 /**
  * Pairing token store persistence.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTokenStore } from '../src/token-store.ts';
@@ -10,12 +10,18 @@ import { createTokenStore } from '../src/token-store.ts';
 let tempDir: string;
 let file: string;
 
+vi.mock('fs', async (importOriginal) => {
+  const fs = await importOriginal<typeof import('node:fs')>();
+  return { ...fs, readFileSync: vi.fn(fs.readFileSync) };
+});
+
 beforeEach(() => {
   tempDir = mkdtempSync(join(tmpdir(), 'ajb-tokens-'));
   file = join(tempDir, 'nested', 'tokens.json');
 });
 
 afterEach(() => {
+  vi.mocked(readFileSync).mockClear();
   rmSync(tempDir, { recursive: true, force: true });
 });
 
@@ -82,5 +88,28 @@ describe('token store', () => {
     const token = store.issueToken();
     expect(existsSync(join(tempDir, 'existing', 'deep', 'tokens.json'))).toBe(true);
     expect(createTokenStore(join(tempDir, 'existing', 'deep', 'tokens.json')).isValid(token)).toBe(true);
+  });
+
+  it.skipIf(process.platform !== 'linux')('rejects a token-file mount and persists under a mounted directory', async () => {
+    const { realpathSync } = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const directory = join(tempDir, 'persistent data');
+    mkdirSync(directory);
+    const tokenPath = join(directory, 'browser tokens.json');
+    writeFileSync(tokenPath, JSON.stringify([{ token: 'legacy-test-token', createdAt: 'x' }]));
+    const store = createTokenStore(tokenPath);
+    const mountPoint = (path: string) => realpathSync.native(path).replaceAll(' ', '\\040');
+    const mountRow = (path: string) => `45 12 8:1 / ${mountPoint(path)} rw - ext4 /dev/root rw\n`;
+
+    vi.mocked(readFileSync).mockReturnValueOnce(mountRow(tokenPath));
+    expect(() => store.checkBoundTokenStorage()).toThrow('Mount the parent directory of BROWSER_TOKEN_STORE');
+    expect(store.isValid('legacy-test-token')).toBe(true);
+
+    vi.mocked(readFileSync).mockReturnValueOnce(mountRow(directory));
+    expect(() => store.checkBoundTokenStorage()).not.toThrow();
+    const identity = { connectionId: 'provisioned-test-browser', label: 'Provisioned browser' };
+    const issuedToken = store.issueBoundToken(identity);
+    const reloaded = createTokenStore(tokenPath);
+    expect(reloaded.isValid('legacy-test-token')).toBe(true);
+    expect(reloaded.isValid(issuedToken, identity.connectionId)).toBe(true);
   });
 });

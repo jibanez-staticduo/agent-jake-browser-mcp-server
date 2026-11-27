@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { once } from 'node:events';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -23,6 +24,8 @@ const httpPort = 25500 + Math.floor(Math.random() * 1000) * 2;
 const tokenFilePath = join(mkdtempSync(join(tmpdir(), 'ajb-setup-')), 'tokens.json');
 const configFilePath = join(tokenFilePath, '..', 'setup.json');
 const oldId = randomUUID();
+const legacyToken = 'existing-test-token';
+const staticToken = 'static-test-token';
 let child: ChildProcess | undefined;
 
 async function http(path: string, options: {
@@ -58,30 +61,44 @@ function status(pollSecret: string) {
   return http('/setup/status', { body: { pollSecret }, headers: { ...extension, ...verified } });
 }
 
-function connect(params: { connectionId: string; label: string; token?: string }) {
+async function openSocket(params: { connectionId: string; label?: string; token?: string }) {
   const query = new URLSearchParams(params);
-  return new Promise<number>((resolve, reject) => {
+  return new Promise<WebSocket | number>((resolve, reject) => {
     const socket = new WebSocket(`ws://127.0.0.1:${httpPort + 1}/?${query}`);
     socket.on('error', reject);
-    socket.once('open', () => { socket.close(); resolve(101); });
+    socket.once('open', () => { resolve(socket); });
     socket.once('unexpected-response', (_req, res) => { res.resume(); resolve(res.statusCode!); });
   });
 }
 
-beforeAll(async () => {
-  writeFileSync(configFilePath, JSON.stringify({
-    origin, ...settings, trustedProxyIps: ['127.0.0.1'], lanCidrs: ['192.0.2.0/24', 'fd00:1234::/64'],
+async function connect(params: Parameters<typeof openSocket>[0]) {
+  const socket = await openSocket(params);
+  if (typeof socket === 'number') return socket;
+  socket.close();
+  await once(socket, 'close');
+  return 101;
+}
+
+function writeConfig(overrides: Partial<typeof settings> = {}, file = configFilePath) {
+  writeFileSync(file, JSON.stringify({
+    origin, ...settings, ...overrides, trustedProxyIps: ['127.0.0.1'], lanCidrs: ['192.0.2.0/24', 'fd00:1234::/64'],
     hostByIp: { '192.0.2.7': 'Workstation' },
   }));
-  createTokenStore(tokenFilePath).addToken('existing-test-token', { connectionId: oldId, label: 'Old - Chrome' });
-  child = spawn(process.execPath, ['dist/http-server.js'], {
+}
+
+function spawnServer(setupFile = configFilePath) {
+  return spawn(process.execPath, ['dist/http-server.js'], {
     env: { ...process.env, MCP_HTTP_PORT: String(httpPort), MCP_HTTP_HOST: '127.0.0.1',
       BROWSER_WS_PORT: String(httpPort + 1), BROWSER_WS_HOST: '127.0.0.1',
-      AGENT_BROWSER_SETUP_FILE: configFilePath, BROWSER_TOKEN_STORE: tokenFilePath, BROWSER_WS_TOKEN: '',
+      AGENT_BROWSER_SETUP_FILE: setupFile, BROWSER_TOKEN_STORE: tokenFilePath, BROWSER_WS_TOKEN: staticToken,
       BROWSER_ALLOW_PAIRING: 'false', AGENT_BROWSER_DEFAULT_CONNECTION: 'Reserved - Default',
       AGENT_BROWSER_CONNECTION_LABELS: JSON.stringify({ [oldId]: 'Reserved - Alias' }) },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
+}
+
+async function startServer() {
+  child = spawnServer();
   let stderr = '';
   child.stderr?.on('data', (s) => { stderr += s; });
   for (let retry = 0; retry < 100; retry++) {
@@ -89,14 +106,24 @@ beforeAll(async () => {
     await new Promise((resolve) => setTimeout(resolve, 40));
   }
   throw new Error(stderr);
-});
+}
 
-afterAll(async () => {
+async function stopServer() {
   if (child?.exitCode === null) {
-    const exited = new Promise((resolve) => child!.once('exit', resolve));
+    const exited = once(child, 'exit');
     child.kill();
     await exited;
   }
+}
+
+beforeAll(async () => {
+  writeConfig();
+  createTokenStore(tokenFilePath).addToken(legacyToken, { connectionId: oldId, label: ' Old - Chrome ' });
+  await startServer();
+});
+
+afterAll(async () => {
+  await stopServer();
   rmSync(join(tokenFilePath, '..'), { recursive: true, force: true });
 });
 
@@ -144,7 +171,7 @@ describe('LAN provisioning', () => {
     expect(preflight.headers['access-control-allow-origin']).toBe(extension.origin);
   });
 
-  it('asks for missing fields and releases exactly one credential set with a fresh identity', async () => {
+  it('lets the user correct invalid approval details and recovers one persisted credential set', async () => {
     const initial = await start({ connectionId: oldId });
     expect(initial.status).toBe(201);
     const { approvalCode, pollSecret } = initial.json;
@@ -156,21 +183,31 @@ describe('LAN provisioning', () => {
     const need = await approve(approvalCode);
     expect(need.status).toBe(422);
     expect(need.json).toEqual({ state: 'pending', missing: ['profile'] });
+    const invalid = await approve(approvalCode, { profile: '   ' });
+    expect(invalid.status).toBe(400);
+    expect(invalid.json.invalid).toEqual(['profile']);
+    expect((await status(pollSecret)).json).toEqual({ state: 'pending' });
     expect((await approve(approvalCode, { profile: 'Chrome', host: 'ignored' })).json).toEqual({ state: 'approved' });
     expect((await approve(approvalCode, { profile: 'ignored' })).json).toEqual({ state: 'approved' });
     expect(JSON.parse(readFileSync(tokenFilePath, 'utf8')).tokens).toHaveLength(1);
     const polls = (await Promise.all([status(pollSecret), status(pollSecret)])).map((reply) => reply.json);
-    expect(polls.map((result) => result.state).sort()).toEqual(['approved', 'expired']);
-    const config = polls.find((result) => result.state === 'approved').config;
+    expect(polls.map((result) => result.state)).toEqual(['approved', 'approved']);
+    expect(polls[0]).toEqual(polls[1]);
+    const config = polls[0].config;
     expect(config).toEqual({ ...settings, connectionId: expect.any(String), label: 'Workstation - Chrome', token: expect.any(String) });
     expect(config.connectionId).not.toBe(oldId);
     expect((await approve(approvalCode)).status).toBe(410);
     expect(JSON.parse(readFileSync(tokenFilePath, 'utf8')).tokens).toHaveLength(2);
-    expect(await connect({ connectionId: oldId, label: 'Old - Chrome', token: 'existing-test-token' })).toBe(101);
+    expect(await connect({ connectionId: oldId, label: 'Old - Chrome', token: legacyToken })).toBe(101);
     expect(await connect({ connectionId: config.connectionId, label: config.label })).toBe(401);
     expect(await connect({ connectionId: oldId, label: config.label, token: config.token })).toBe(401);
-    expect(await connect({ connectionId: config.connectionId, label: 'other label', token: 'existing-test-token' })).toBe(401);
+    expect(await connect({ connectionId: config.connectionId, label: 'other label', token: legacyToken })).toBe(401);
     expect(await connect({ connectionId: config.connectionId, label: 'Renamed locally', token: config.token })).toBe(101);
+
+    await stopServer();
+    await startServer();
+    expect((await status(pollSecret)).json).toEqual({ state: 'expired' });
+    expect(await connect({ connectionId: config.connectionId, token: config.token })).toBe(101);
   });
 
   it('reserves existing routing names and issues distinct IDs across multiple approvals', async () => {
@@ -183,12 +220,52 @@ describe('LAN provisioning', () => {
     const one = (await start({ host: 'Test Lab', profile: 'Firefox', connectionId: oldId })).json;
     const two = (await start({ host: 'TEST LAB', profile: 'firefox', connectionId: oldId })).json;
     expect((await approve(one.approvalCode)).status).toBe(200);
+    for (const token of [legacyToken, staticToken]) {
+      expect(await connect({ connectionId: ' TEST LAB - firefox ', token })).toBe(401);
+    }
     expect((await approve(two.approvalCode)).status).toBe(422);
     expect((await approve(two.approvalCode, { profile: 'Chrome' })).status).toBe(200);
     const winnerOne = (await status(one.pollSecret)).json.config;
     const winnerTwo = (await status(two.pollSecret)).json.config;
     expect(new Set([oldId, winnerOne.connectionId, winnerTwo.connectionId]).size).toBe(3);
-    expect(await connect({ connectionId: oldId, label: winnerOne.label, token: 'existing-test-token' })).toBe(401);
+    for (const token of [legacyToken, staticToken]) {
+      expect(await connect({ connectionId: ' TEST LAB - firefox ', token })).toBe(401);
+      expect(await connect({ connectionId: oldId, label: winnerOne.label, token })).toBe(401);
+      expect(await connect({ connectionId: oldId, label: winnerOne.connectionId.toUpperCase(), token })).toBe(401);
+    }
+  });
+
+  it('reserves the routing names of already connected browsers', async () => {
+    const socket = await openSocket({
+      connectionId: 'Example - Old ID', label: 'Example - Old Label', token: staticToken,
+    });
+    expect(socket).toBeInstanceOf(WebSocket);
+    if (typeof socket === 'number') return;
+    try {
+      for (const profile of ['old id', 'old label']) {
+        const exchange = (await start({ host: 'example', profile })).json;
+        const reply = await approve(exchange.approvalCode);
+        expect(reply.status).toBe(422);
+        expect(reply.json).toEqual({ state: 'pending', missing: ['profile'], conflict: true });
+        expect((await status(exchange.pollSecret)).json).toEqual({ state: 'pending' });
+      }
+      expect(socket.readyState).toBe(WebSocket.OPEN);
+    } finally {
+      socket.close();
+      await once(socket, 'close');
+    }
+  });
+
+  it.each(['apiKey', 'mcpToken'] as const)('rejects an invalid %s at startup without logging its value', async (field) => {
+    const invalid = 'invalid-credential ';
+    const file = join(tokenFilePath, '..', `invalid-${field}.json`);
+    writeConfig({ [field]: invalid }, file);
+    const invalidProcess = spawnServer(file);
+    let stderr = '';
+    invalidProcess.stderr.on('data', (chunk) => { stderr += chunk; });
+    expect((await once(invalidProcess, 'close'))[0]).toBe(1);
+    expect(stderr).toContain('AGENT_BROWSER_SETUP_FILE is unreadable or invalid');
+    expect(stderr).not.toContain(invalid.trim());
   });
 
   it('bounds memory, expires approved requests and retries failed persistence', () => {
@@ -210,5 +287,47 @@ describe('LAN provisioning', () => {
     expect(() => store.status(second.pollSecret)).toThrow();
     available = true;
     expect(store.status(second.pollSecret)).toMatchObject({ state: 'approved', config: { label: 'c - d' } });
+  });
+
+  it('keeps approval pending if the token storage check fails', () => {
+    let supportedStorage = false;
+    const store = createSetupStore(settings, () => 'issued-once', {
+      checkApproval: () => {
+        if (!supportedStorage) throw new Error('unsupported storage');
+      },
+    });
+    const exchange = store.start({ host: 'A', profile: 'B' })!;
+    expect(() => store.approve(exchange.approvalCode, {})).toThrow('unsupported storage');
+    expect(store.isReserved('A - B')).toBe(false);
+    expect(store.status(exchange.pollSecret)).toEqual({ state: 'pending' });
+    supportedStorage = true;
+    expect(store.approve(exchange.approvalCode, {})).toEqual({ state: 'approved' });
+    expect(store.status(exchange.pollSecret)).toMatchObject({ state: 'approved', config: { token: 'issued-once' } });
+  });
+
+  it('holds delivery to the original TTL and does not reissue a revoked credential', () => {
+    let clock = 0;
+    let issued = 0;
+    let valid = true;
+    const store = createSetupStore(settings, () => `token-${++issued}`, {
+      now: () => clock, ttlMs: 10, isTokenValid: () => valid,
+    });
+    const expiring = store.start({ host: 'A', profile: 'B' })!;
+    const revoking = store.start({ host: 'C', profile: 'D' })!;
+    clock = 7;
+    store.approve(expiring.approvalCode, {});
+    store.approve(revoking.approvalCode, {});
+    const firstDelivery = store.status(expiring.pollSecret);
+    expect(firstDelivery.state).toBe('approved');
+    expect(store.status(revoking.pollSecret).state).toBe('approved');
+    clock = 9;
+    expect(store.status(expiring.pollSecret)).toEqual(firstDelivery);
+    valid = false;
+    expect(store.status(revoking.pollSecret)).toEqual({ state: 'expired' });
+    valid = true;
+    expect(store.status(revoking.pollSecret)).toEqual({ state: 'expired' });
+    clock = 10;
+    expect(store.status(expiring.pollSecret)).toEqual({ state: 'expired' });
+    expect(issued).toBe(2);
   });
 });

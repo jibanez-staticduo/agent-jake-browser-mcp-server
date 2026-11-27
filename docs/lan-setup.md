@@ -16,7 +16,13 @@ Set `AGENT_BROWSER_SETUP_FILE` separately on NAS, Defend (Fedora), and Ari. Moun
 }
 ```
 
-`origin` is the extension's exact HTTPS setup origin with no trailing slash. The remaining URLs use HTTPS or WSS and contain no credentials, query, or fragment. Configure the actual LAN client CIDRs. `hostByIp` is optional and works best with stable DHCP assignments. Users supply any missing host or profile in the approval page. Use one HTTP/WS replica per instance and persist the token store volume. In-progress exchanges expire after five minutes and are cleared on restart. An enabled setup file activates WebSocket token authentication and disables the older `/pair` endpoints. Existing valid WebSocket tokens continue to work.
+`origin` is the extension's exact HTTPS setup origin with no trailing slash. The remaining URLs use HTTPS or WSS and contain no credentials, query, or fragment. The `apiKey` and `mcpToken` must consist of printable ASCII characters without spaces. Configure the actual LAN client CIDRs. `hostByIp` is optional and works best with stable DHCP assignments. Users supply any missing host or profile in the approval page. Use one HTTP/WS replica per instance. Exchanges expire five minutes after they start and are cleared on restart. An enabled setup file activates WebSocket token authentication and disables the older `/pair` endpoints. Existing valid WebSocket tokens continue to work.
+
+### Token store volume
+
+Mount a writable volume or bind mount at the directory containing `BROWSER_TOKEN_STORE` (by default, `/app/data` contains `/app/data/tokens.json`). LAN setup uses atomic file replacement to persist credentials. On Linux, approval returns HTTP `503` if the token store file itself is a mount point.
+
+For an existing single-file mount, stop the instance and back up the token file privately. Copy it into the new persistent directory with access restricted to the server user. Replace the file mount with a mount of that directory and point `BROWSER_TOKEN_STORE` to the copied file inside it. Restart the instance and check that existing browsers reconnect before pairing another browser. The setup configuration file can still be mounted read-only.
 
 ## Nginx Proxy Manager
 
@@ -56,9 +62,11 @@ Validate the active virtual host with `nginx -t` and inspect the effective locat
 
 ## HTTP contract
 
-The extension calls `POST /setup/start` with JSON containing optional `host` and `profile`. The server replies `201` with separate `approvalCode` and `pollSecret` values. The extension opens `GET /setup?code=<approvalCode>` as a top-level browser tab. The page removes the query from the address bar and calls `POST /setup/approve` on the same origin. The approval response has only `state` and, when a field is missing, a `missing` list with HTTP `422`.
+The extension calls `POST /setup/start` with JSON containing optional `host` and `profile`. The server replies `201` with separate `approvalCode` and `pollSecret` values. The extension opens `GET /setup?code=<approvalCode>` as a top-level browser tab. The page removes the query from the address bar and calls `POST /setup/approve` on the same origin. The approval response has only `state` on success. HTTP `422` identifies fields still needed and may signal a naming conflict, and HTTP `400` identifies invalid fields when available.
 
-The extension polls via `POST /setup/status` with JSON `{ "pollSecret": "..." }`. The first approved poll receives `{ state: "approved", config: { connectionId, label, wsUrl, token, baseUrl, apiKey, mcpUrl, mcpToken } }`. The server assigns a fresh UUID and binds the browser token to that UUID. It stores a distinct label for routing and keeps that label if the extension changes its local display name. Operators can change the routing name through `AGENT_BROWSER_CONNECTION_LABELS`. Use UUIDs for stable routing because users can supply host and profile names. A consumed or expired poll returns `{ state: "expired" }`. Start a new exchange if a connection drops before the extension can store its approved result.
+The extension polls via `POST /setup/status` with JSON `{ "pollSecret": "..." }`. The first approved poll persists the browser token and receives `{ state: "approved", config: { connectionId, label, wsUrl, token, baseUrl, apiKey, mcpUrl, mcpToken } }`. Use the same poll secret to recover the same configuration if the request or response is lost. Retry HTTP `503` while the original exchange is active. A poll following expiry, revocation or a server restart returns `{ state: "expired" }`.
+
+The server assigns a fresh UUID and binds the browser token to that UUID. It stores a distinct label for routing and keeps that label if the extension changes its local display name. Operators can change the routing name through `AGENT_BROWSER_CONNECTION_LABELS`. Use UUIDs for stable routing because users can supply host and profile names.
 
 ## Repeat pairing and revocation
 

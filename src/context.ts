@@ -14,6 +14,7 @@ export interface ContextOptions {
   port: number;
   host?: string;
   tokenStore?: TokenStore;
+  isSetupNameReserved?: (name: string) => boolean;
 }
 
 export interface ContextManager extends Context {
@@ -38,6 +39,7 @@ export function createContext(options: ContextOptions): ContextManager {
     port,
     host: options.host,
     tokenStore: options.tokenStore,
+    isSetupNameReserved: options.isSetupNameReserved,
     onConnection: (_ws, connectionId) => {
       if (connectionResolve) {
         connectionResolve();

@@ -12,12 +12,14 @@ import { logger } from './utils/logger.js';
 import { getSharedTokenStore, type TokenStore } from './token-store.js';
 import { getClientIpInfo, parseTrustedProxyIps } from './client-ip.js';
 import { ConnectionRegistry, type ManagedConnection } from './connection-registry.js';
+import { parseLabels, normalizeConnectionName } from './connection-target.js';
 import type { BrowserConnectionInfo, ExtensionMessage, ExtensionResponse } from './types.js';
 
 export interface WSServerOptions {
   port: number;
   host?: string;
   tokenStore?: TokenStore;
+  isSetupNameReserved?: (name: string) => boolean;
   onConnection?: (ws: WebSocket, connectionId: string) => void;
   onDisconnection?: (connectionId: string) => void;
   onMessage?: (message: ExtensionResponse) => void;
@@ -88,6 +90,7 @@ export function isAuthorizedToken(
 export function createWSServer(options: WSServerOptions): WSServer {
   const { port, onConnection, onDisconnection, onMessage } = options;
   const tokenStore = options.tokenStore ?? getSharedTokenStore();
+  const connectionLabels = parseLabels(process.env.AGENT_BROWSER_CONNECTION_LABELS);
   const registry = new ConnectionRegistry();
   const trustedProxyIps = parseTrustedProxyIps(process.env.BROWSER_TRUSTED_PROXY_IPS);
   const pendingRequests = new Map<string, {
@@ -113,13 +116,20 @@ export function createWSServer(options: WSServerOptions): WSServer {
   // by the pairing page) is required whenever auth is enabled.
   const host = options.host || process.env.BROWSER_WS_HOST || '127.0.0.1';
 
+  function isReservedName(name: string | null): boolean {
+    if (!name?.trim()) return false;
+    return tokenStore.isBoundName(name) || !!options.isSetupNameReserved?.(name) ||
+      Object.entries(connectionLabels).some(([id, alias]) =>
+        normalizeConnectionName(alias) === normalizeConnectionName(name) && !!tokenStore.getBoundIdentity(id));
+  }
+
   function authorize(params: HandshakeParams): boolean {
     const identity = boundIdentity(params);
     if (identity) {
       return !!params.token && safeEqual(identity.token, params.token) &&
         tokenStore.isValid(params.token, params.connectionId);
     }
-    if (params.label && tokenStore.isBoundLabel(params.label.trim())) return false;
+    if (isReservedName(params.connectionId) || isReservedName(params.label)) return false;
     if (!isAuthEnabled()) return true;
     return isAuthorizedToken(params.token, tokenStore, process.env, params.connectionId);
   }
@@ -162,7 +172,12 @@ export function createWSServer(options: WSServerOptions): WSServer {
       return;
     }
 
-    const connectionId = params.connectionId?.trim() || registry.nextAnonymousId();
+    let connectionId = params.connectionId?.trim();
+    if (!connectionId) {
+      do {
+        connectionId = registry.nextAnonymousId();
+      } while (isReservedName(connectionId) || registry.get(connectionId));
+    }
     const { added, replaced } = registry.add({
       connectionId,
       ws,

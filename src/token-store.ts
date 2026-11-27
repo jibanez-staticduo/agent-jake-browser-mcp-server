@@ -6,8 +6,9 @@
  * makes the tokens survive a container restart.
  */
 import { randomBytes } from 'crypto';
-import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, rmSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, realpathSync, renameSync, rmSync } from 'fs';
 import { dirname } from 'path';
+import { normalizeConnectionName } from './connection-target.js';
 import { logger } from './utils/logger.js';
 
 export interface TokenRecord {
@@ -24,12 +25,13 @@ export interface TokenStore {
   load(): TokenRecord[];
   /** Generate a new random token and persist it. */
   issueToken(meta?: { label?: string; connectionId?: string }): string;
+  checkBoundTokenStorage(): void;
   issueBoundToken(identity: { label: string; connectionId: string }): string;
   /** Register an existing token (idempotent). Returns false when already present. */
   addToken(token: string, meta?: { label?: string; connectionId?: string }): boolean;
   isValid(token: string, connectionId?: string | null): boolean;
   getBoundIdentity(connectionId: string): { token: string; label: string } | undefined;
-  isBoundLabel(label: string): boolean;
+  isBoundName(name: string): boolean;
   list(): TokenRecord[];
 }
 
@@ -82,6 +84,17 @@ export function createTokenStore(
     }
   }
 
+  function checkBoundTokenStorage(): void {
+    if (process.platform !== 'linux' || !existsSync(filePath)) return;
+    const target = realpathSync.native(filePath);
+    // Linux mountinfo escapes whitespace and backslashes as octal sequences.
+    const mountPoints = readFileSync('/proc/self/mountinfo', 'utf-8').split('\n')
+      .map((line) => line.split(' ')[4]?.replace(/\\([0-7]{3})/g, (_, octal) => String.fromCharCode(parseInt(octal, 8))));
+    if (mountPoints.includes(target)) {
+      throw new Error('Mount the parent directory of BROWSER_TOKEN_STORE for LAN setup');
+    }
+  }
+
   function issueBoundToken(identity: { label: string; connectionId: string }): string {
     const token = randomBytes(32).toString('hex');
     const record: TokenRecord = { token, createdAt: new Date().toISOString(), ...identity, bound: true };
@@ -109,6 +122,7 @@ export function createTokenStore(
   return {
     filePath,
     load,
+    checkBoundTokenStorage,
     issueBoundToken,
     issueToken(meta) {
       const token = randomBytes(32).toString('hex');
@@ -139,11 +153,15 @@ export function createTokenStore(
       return !!record.connectionId && !!record.label && record.connectionId === connectionId;
     },
     getBoundIdentity(connectionId) {
-      const record = records.find((item) => item.bound && item.connectionId?.toLowerCase() === connectionId.toLowerCase());
+      const wanted = normalizeConnectionName(connectionId);
+      const record = records.find((item) => item.bound && item.connectionId &&
+        normalizeConnectionName(item.connectionId) === wanted);
       return record?.label ? { token: record.token, label: record.label } : undefined;
     },
-    isBoundLabel(label) {
-      return records.some((item) => item.bound && item.label?.toLowerCase() === label.toLowerCase());
+    isBoundName(name) {
+      const wanted = normalizeConnectionName(name);
+      return records.some((item) => item.bound && [item.connectionId, item.label].some((value) =>
+        value && normalizeConnectionName(value) === wanted));
     },
     list() {
       return records.map((r) => ({ ...r }));

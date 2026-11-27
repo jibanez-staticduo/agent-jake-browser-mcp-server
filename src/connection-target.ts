@@ -41,7 +41,11 @@ export function parseLabels(raw: string | undefined): Record<string, string> {
 }
 
 export function nameOf(c: OpenConnection, labels: Record<string, string>): string {
-  return labels[c.connectionId] || c.label || '';
+  return (Object.hasOwn(labels, c.connectionId) && labels[c.connectionId]) || c.label || '';
+}
+
+export function normalizeConnectionName(name: string): string {
+  return name.trim().toLowerCase();
 }
 
 /** Match an id or a friendly name (case-insensitive) against the open connections. */
@@ -50,10 +54,10 @@ export function findConnection(
   open: OpenConnection[],
   labels: Record<string, string>,
 ): OpenConnection | undefined {
-  const w = wanted.trim().toLowerCase();
+  const w = normalizeConnectionName(wanted);
   return (
-    open.find((c) => c.connectionId.toLowerCase() === w) ??
-    open.find((c) => nameOf(c, labels).toLowerCase() === w)
+    open.find((c) => normalizeConnectionName(c.connectionId) === w) ??
+    open.find((c) => normalizeConnectionName(nameOf(c, labels)) === w)
   );
 }
 

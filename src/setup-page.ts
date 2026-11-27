@@ -36,6 +36,7 @@ export function setupPage(nonce: string) {
 
     async function approve(values = {}) {
       button.disabled = true;
+      for (const input of inputs) input.removeAttribute('aria-invalid');
       try {
         const response = await fetch('/setup/approve', {
           method: 'POST',
@@ -57,6 +58,15 @@ export function setupPage(nonce: string) {
           message.textContent = conflict
             ? 'Ese nombre ya est\u00e1 en uso. Elige otro nombre de perfil.'
             : 'Completa los datos para identificar este navegador.';
+          return;
+        }
+        if (response.status === 400 && !form.hidden) {
+          const { invalid = [] } = await response.json();
+          const editable = inputs.filter((input) => !input.disabled);
+          const invalidInputs = editable.filter((input) => invalid.includes(input.id));
+          for (const input of invalidInputs) input.setAttribute('aria-invalid', 'true');
+          (invalidInputs[0] || editable[0])?.focus();
+          message.textContent = 'Revisa los datos. Escribe un nombre de hasta 62 caracteres, sin caracteres de control.';
           return;
         }
         form.hidden = true;

@@ -15,7 +15,7 @@ import { createPairingStore } from './pairing-store.js';
 import { patchZipConfig } from './extension-zip.js';
 import { extensionZipPath, readPublishedVersion } from './published-extension.js';
 import { installerScript } from './installer.js';
-import { parseLabels, nameOf, resolveTarget, findConnection } from './connection-target.js';
+import { parseLabels, nameOf, normalizeConnectionName, resolveTarget, findConnection } from './connection-target.js';
 import { createTabReaper, idleMinutesFromEnv } from './tab-reaper.js';
 import { createSessionTabs, acceptsExplicitTab } from './session-tabs.js';
 import { readSetupConfig, setupClientIp, setupField, singleHeader } from './setup-config.js';
@@ -57,12 +57,15 @@ function openConnections() {
 
 const app = express();
 const tokenStore = getSharedTokenStore();
-installSetupRoutes();
+const setupStore = installSetupRoutes();
 app.use(express.json());
 
 const transports = new Map();
 const servers = new Map();
-const context = createContext({ port: WS_PORT });
+const context = createContext({
+  port: WS_PORT,
+  isSetupNameReserved: setupStore?.isReserved,
+});
 const allTools = getAllTools();
 const toolMap = new Map(allTools.map((tool) => [tool.schema.name, tool]));
 
@@ -165,7 +168,8 @@ async function callTool(name, rawArgs, sessionId) {
       secondsSinceLastActivity: c.secondsSinceLastActivity,
       thisSession: c.connectionId === mine,
       configuredDefault: !!DEFAULT_CONNECTION &&
-        [c.connectionId, nameOf(c, CONNECTION_LABELS)].some((v) => v && v.toLowerCase() === DEFAULT_CONNECTION.toLowerCase()),
+        [c.connectionId, nameOf(c, CONNECTION_LABELS)].some((v) =>
+          v && normalizeConnectionName(v) === normalizeConnectionName(DEFAULT_CONNECTION)),
     }));
     return textContent(JSON.stringify(rows, null, 2));
   }
@@ -224,7 +228,12 @@ function listToolsResult() {
 
 function installSetupRoutes() {
   const router = express.Router({ caseSensitive: true, strict: true });
-  const store = setupConfig && createSetupStore(setupConfig.settings, tokenStore.issueBoundToken, { isLabelTaken });
+  const store = setupConfig && createSetupStore(setupConfig.settings, tokenStore.issueBoundToken, {
+    isNameTaken,
+    checkApproval: tokenStore.checkBoundTokenStorage,
+    isTokenValid: ({ connectionId, token }) =>
+      tokenStore.getBoundIdentity(connectionId)?.token === token && tokenStore.isValid(token, connectionId),
+  });
   // Match all casings and suffixes at the boundary, even for unavailable endpoints.
   app.use('/setup', (req, res, next) => {
     res.set({
@@ -243,9 +252,9 @@ function installSetupRoutes() {
   if (!store) return;
   app.use('/pair', (_req, res) => res.set('Cache-Control', 'no-store').sendStatus(404));
 
-  function isLabelTaken(label) {
-    const wanted = label.toLowerCase();
-    const matches = (value) => value?.toLowerCase() === wanted;
+  function isNameTaken(name) {
+    const wanted = normalizeConnectionName(name);
+    const matches = (value) => value && normalizeConnectionName(value) === wanted;
     return matches(DEFAULT_CONNECTION) ||
       Object.entries(CONNECTION_LABELS).some(([id, alias]) => matches(id) || matches(alias)) ||
       tokenStore.list().some((item) => matches(item.connectionId) || matches(item.label)) ||
@@ -299,10 +308,18 @@ function installSetupRoutes() {
     next();
   }, requireJson, (req, res) => {
     const parsed = approve.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: 'Invalid setup approval' });
-    const result = store.approve(parsed.data.code, parsed.data);
-    const httpStatus = result.state === 'pending' ? 422 : result.state === 'expired' ? 410 : 200;
-    return res.status(httpStatus).json(result);
+    if (!parsed.success) {
+      const invalid = ['host', 'profile'].filter((field) =>
+        parsed.error.issues.some((issue) => issue.path[0] === field));
+      return res.status(400).json({ error: 'Invalid setup approval', invalid });
+    }
+    try {
+      const result = store.approve(parsed.data.code, parsed.data);
+      const httpStatus = result.state === 'pending' ? 422 : result.state === 'expired' ? 410 : 200;
+      return res.status(httpStatus).json(result);
+    } catch {
+      return res.status(503).json({ error: 'Pairing token temporarily unavailable' });
+    }
   });
   router.post('/status', extensionRequest, requireJson, (req, res) => {
     const parsed = status.safeParse(req.body);
@@ -313,6 +330,7 @@ function installSetupRoutes() {
       return res.status(503).json({ error: 'Pairing token temporarily unavailable' });
     }
   });
+  return store;
 }
 
 /**

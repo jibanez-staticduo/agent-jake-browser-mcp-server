@@ -7,6 +7,7 @@ import type { SetupSettings } from './setup-store.js';
 
 export const SETUP_CLIENT_IP_HEADER = 'x-agent-jake-client-ip';
 export const setupField = z.string().trim().min(1).max(62).regex(/^[^\p{Cc}]+$/u);
+const credential = z.string().regex(/^[\x21-\x7e]+$/);
 
 function endpoint(scheme: 'https:' | 'wss:') {
   return z.url({ protocol: scheme === 'https:' ? /^https$/ : /^wss$/ }).refine((value) => {
@@ -19,9 +20,9 @@ const configSchema = z.strictObject({
   origin: endpoint('https:').refine((value) => new URL(value).origin === value),
   wsUrl: endpoint('wss:'),
   baseUrl: endpoint('https:'),
-  apiKey: z.string().min(1),
+  apiKey: credential,
   mcpUrl: endpoint('https:'),
-  mcpToken: z.string().min(1),
+  mcpToken: credential,
   lanCidrs: z.array(z.string()).min(1),
   trustedProxyIps: z.array(z.string()).default([]),
   hostByIp: z.record(z.string(), setupField).default({}),
